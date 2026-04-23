@@ -306,9 +306,7 @@ function parseStored(raw: string | null): ClubConfig | null {
       cantidadClasesDia:
         typeof p.cantidadClasesDia === "string"
           ? p.cantidadClasesDia
-          : typeof p.clasesPorBloque === "string"
-            ? p.clasesPorBloque
-            : defaultConfig.cantidadClasesDia,
+          : defaultConfig.cantidadClasesDia,
       horariosFijos:
         Array.isArray(p.horariosFijos) && p.horariosFijos.length > 0
           ? p.horariosFijos.filter(
