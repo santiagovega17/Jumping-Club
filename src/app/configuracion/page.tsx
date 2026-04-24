@@ -42,6 +42,7 @@ import {
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 
 const LABEL_TECH =
   "text-sm font-medium text-zinc-400 uppercase tracking-wider";
@@ -345,6 +346,7 @@ export default function ConfiguracionPage() {
   const [nuevaClaseNombre, setNuevaClaseNombre] = useState("");
   const [nuevaClaseInstructorId, setNuevaClaseInstructorId] = useState("");
   const [nuevaClaseHorario, setNuevaClaseHorario] = useState("09:00");
+  const [adminFranquiciaId, setAdminFranquiciaId] = useState<string | null>(null);
 
   useEffect(() => {
     const loaded = parseStored(
@@ -360,6 +362,49 @@ export default function ConfiguracionPage() {
     if (!hydrated || typeof window === "undefined") return;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
   }, [config, hydrated]);
+
+  useEffect(() => {
+    const loadPlanesForAdminFranquicia = async () => {
+      try {
+        const supabase = createSupabaseClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+
+        const { data: perfil, error: perfilError } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+
+        if (perfilError || !perfil?.franquicia_id) return;
+        setAdminFranquiciaId(perfil.franquicia_id);
+
+        const { data: planes, error: planesError } = await supabase
+          .from("planes")
+          .select("id,nombre,precio,version")
+          .eq("franquicia_id", perfil.franquicia_id)
+          .eq("estado", "activo")
+          .order("nombre", { ascending: true });
+
+        if (!planesError && planes) {
+          setConfig((c) => ({
+            ...c,
+            pases: planes.map((p) => ({
+              id: p.id,
+              nombre: p.version ? `${p.nombre} (${p.version})` : p.nombre,
+              precio: Math.round(Number(p.precio) || 0),
+            })),
+          }));
+        }
+      } catch {
+        // fallback local-only
+      }
+    };
+
+    loadPlanesForAdminFranquicia();
+  }, []);
 
   const updateBlock = useCallback(
     (block: "manana" | "tarde", patch: Partial<BlockSchedule>) => {
@@ -394,17 +439,53 @@ export default function ConfiguracionPage() {
     [config.instructores],
   );
 
-  const addPase = () => {
+  const addPase = async () => {
     const nombre = nuevoPaseNombre.trim();
     const precio = Math.max(0, Math.round(Number(nuevoPasePrecio) || 0));
     if (!nombre) return;
-    setConfig((c) => ({
-      ...c,
-      pases: [...c.pases, { id: newId("pase"), nombre, precio }],
-    }));
-    setNuevoPaseNombre("");
-    setNuevoPasePrecio("");
-    toast.success("Pase agregado correctamente");
+    if (!adminFranquiciaId) {
+      toast.error("No se pudo identificar la franquicia del administrador");
+      return;
+    }
+
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase.from("planes").insert({
+        franquicia_id: adminFranquiciaId,
+        nombre,
+        precio,
+        version: "v1",
+        estado: "activo",
+      });
+
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+
+      const { data: planes, error: loadError } = await supabase
+        .from("planes")
+        .select("id,nombre,precio,version")
+        .eq("franquicia_id", adminFranquiciaId)
+        .eq("estado", "activo")
+        .order("nombre", { ascending: true });
+
+      if (!loadError && planes) {
+        setConfig((c) => ({
+          ...c,
+          pases: planes.map((p) => ({
+            id: p.id,
+            nombre: p.version ? `${p.nombre} (${p.version})` : p.nombre,
+            precio: Math.round(Number(p.precio) || 0),
+          })),
+        }));
+      }
+      setNuevoPaseNombre("");
+      setNuevoPasePrecio("");
+      toast.success("Plan creado correctamente");
+    } catch {
+      toast.error("No se pudo crear el plan");
+    }
   };
 
   const removePase = (id: string) => {

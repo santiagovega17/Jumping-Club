@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { AlertTriangle, Filter, Plus, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,6 +45,8 @@ import { PremiumDialogTitle, PremiumSheetTitle } from "@/components/PremiumTitle
 import { PAGE_SUBTITLE_CLASS, PAGE_TITLE_CLASS } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { createClient as createSupabaseClient } from "@/lib/supabase/client";
+import { registrarSocioAction } from "@/actions/socios";
 
 type Role = "administracion" | "socio";
 
@@ -509,6 +511,7 @@ type NuevoSocioForm = {
   provincia: string;
   correo: string;
   plan: string;
+  planId: string;
   precioActual: string;
   formaPagoPreferida: FormaPagoPreferida;
   numeroTarjeta: string;
@@ -527,12 +530,22 @@ function formularioNuevoVacio(): NuevoSocioForm {
     provincia: "",
     correo: "",
     plan: defaultPlan,
+    planId: "",
     precioActual: String(priceForPlan(defaultPlan)),
     formaPagoPreferida: "Efectivo",
     numeroTarjeta: "",
     titular: "",
   };
 }
+
+type PlanOption = {
+  id: string;
+  nombre: string;
+  version: string | null;
+  precio: number;
+  franquicia_id: string | null;
+  estado: string | null;
+};
 
 export default function SociosPage() {
   const [role] = useState<Role>(() => {
@@ -552,6 +565,9 @@ export default function SociosPage() {
 
   const [bajaOpen, setBajaOpen] = useState(false);
   const [motivoBaja, setMotivoBaja] = useState("");
+  const [isPending, startTransition] = useTransition();
+  const [planesActivos, setPlanesActivos] = useState<PlanOption[]>([]);
+  const [adminFranquiciaId, setAdminFranquiciaId] = useState<string | null>(null);
 
   const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>({ ...filtroEstadoVacio });
   const [filtroPlan, setFiltroPlan] = useState<(typeof PLAN_FILTROS)[number]>("Todos");
@@ -577,6 +593,55 @@ export default function SociosPage() {
 
   const socioRequiereRevision = (socio: Socio) =>
     monthDiff(socio.mesUltimoAumento, new Date()) >= 3;
+
+  useEffect(() => {
+    const loadAdminContextAndPlanes = async () => {
+      try {
+        const supabase = createSupabaseClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+
+        const { data: perfil, error: perfilError } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+
+        if (perfilError || !perfil?.franquicia_id) return;
+        setAdminFranquiciaId(perfil.franquicia_id);
+
+        const { data: planes, error: planesError } = await supabase
+          .from("planes")
+          .select("id,nombre,version,precio,franquicia_id,estado")
+          .eq("franquicia_id", perfil.franquicia_id)
+          .eq("estado", "activo")
+          .order("nombre", { ascending: true });
+
+        if (!planesError && planes) {
+          setPlanesActivos(planes as PlanOption[]);
+          setNuevoForm((f) => {
+            if (f.planId || planes.length === 0) return f;
+            const defaultPlan = planes[0] as PlanOption;
+            const planLabel = defaultPlan.version
+              ? `${defaultPlan.nombre} (${defaultPlan.version})`
+              : defaultPlan.nombre;
+            return {
+              ...f,
+              planId: defaultPlan.id,
+              plan: planLabel,
+              precioActual: String(defaultPlan.precio),
+            };
+          });
+        }
+      } catch {
+        // noop: UI can still work with local fallback.
+      }
+    };
+
+    loadAdminContextAndPlanes();
+  }, []);
 
   const filtrados = useMemo(() => {
     let list = socios;
@@ -709,42 +774,76 @@ export default function SociosPage() {
   };
 
   const guardarNuevoSocio = () => {
-    if (!nuevoForm.nombre.trim() || !nuevoForm.dni.trim()) return;
-    const planSeleccionado = (nuevoForm.plan as PlanVersion) || "Mensual Premium";
-    const precioActual = priceForPlan(planSeleccionado);
-    const [year] = nuevoForm.mesUltimoAumento.split("-").map(Number);
-    const nuevo: Socio = {
-      vendedor: nuevoForm.vendedor.trim() || "Sin asignar",
-      mesUltimoAumento: nuevoForm.mesUltimoAumento || yyyymm(new Date()),
-      nombre: nuevoForm.nombre.trim(),
-      dni: nuevoForm.dni.trim(),
-      celular: nuevoForm.celular.trim() || "—",
-      domicilio: nuevoForm.domicilio.trim() || "—",
-      provincia: nuevoForm.provincia.trim() || "—",
-      correo: nuevoForm.correo.trim() || "—",
-      plan: planSeleccionado,
-      precioActual,
-      historialPrecios: createHistorialAnual(
+    if (
+      !nuevoForm.nombre.trim() ||
+      !nuevoForm.dni.trim() ||
+      !nuevoForm.correo.trim() ||
+      !nuevoForm.planId ||
+      !adminFranquiciaId
+    ) {
+      toast.error("Completá nombre, email, DNI y plan para registrar el socio");
+      return;
+    }
+
+    startTransition(async () => {
+      const result = await registrarSocioAction({
+        nombre: nuevoForm.nombre.trim(),
+        email: nuevoForm.correo.trim(),
+        telefono: nuevoForm.celular.trim() || null,
+        dni: nuevoForm.dni.trim(),
+        planId: nuevoForm.planId,
+        franquiciaId: adminFranquiciaId,
+      });
+
+      if (!result.ok) {
+        toast.error(result.error ?? "No se pudo registrar el socio");
+        return;
+      }
+
+      const selectedPlan = planesActivos.find((p) => p.id === nuevoForm.planId);
+      const planLabel = selectedPlan
+        ? selectedPlan.version
+          ? `${selectedPlan.nombre} (${selectedPlan.version})`
+          : selectedPlan.nombre
+        : nuevoForm.plan;
+      const precioActual =
+        selectedPlan?.precio ?? (Number(nuevoForm.precioActual) || 0);
+      const [year] = nuevoForm.mesUltimoAumento.split("-").map(Number);
+
+      const nuevo: Socio = {
+        vendedor: nuevoForm.vendedor.trim() || "Sin asignar",
+        mesUltimoAumento: nuevoForm.mesUltimoAumento || yyyymm(new Date()),
+        nombre: nuevoForm.nombre.trim(),
+        dni: nuevoForm.dni.trim(),
+        celular: nuevoForm.celular.trim() || "—",
+        domicilio: nuevoForm.domicilio.trim() || "—",
+        provincia: nuevoForm.provincia.trim() || "—",
+        correo: nuevoForm.correo.trim() || "—",
+        plan: planLabel,
         precioActual,
-        year || new Date().getFullYear(),
-      ),
-      historialPlanes: createHistorialPlanes(
-        planSeleccionado,
-        year || new Date().getFullYear(),
-      ),
-      historialMensual: createHistorialMensual(
-        planSeleccionado,
-        precioActual,
-        year || new Date().getFullYear(),
-      ),
-      formaPagoPreferida: nuevoForm.formaPagoPreferida,
-      numeroTarjeta: nuevoForm.numeroTarjeta.trim(),
-      titular: nuevoForm.titular.trim() || nuevoForm.nombre.trim(),
-      estado: "Al día",
-    };
-    setSocios((prev) => [...prev, nuevo]);
-    cerrarNuevoSheet();
-    toast.success("Socio guardado correctamente");
+        historialPrecios: createHistorialAnual(
+          precioActual,
+          year || new Date().getFullYear(),
+        ),
+        historialPlanes: createHistorialPlanes(
+          planLabel,
+          year || new Date().getFullYear(),
+        ),
+        historialMensual: createHistorialMensual(
+          planLabel,
+          precioActual,
+          year || new Date().getFullYear(),
+        ),
+        formaPagoPreferida: nuevoForm.formaPagoPreferida,
+        numeroTarjeta: nuevoForm.numeroTarjeta.trim(),
+        titular: nuevoForm.titular.trim() || nuevoForm.nombre.trim(),
+        estado: "Al día",
+      };
+
+      setSocios((prev) => [...prev, nuevo]);
+      cerrarNuevoSheet();
+      toast.success("Socio registrado correctamente");
+    });
   };
 
   const confirmarBaja = () => {
@@ -1182,22 +1281,29 @@ export default function SociosPage() {
                   Plan
                 </Label>
                 <Select
-                  value={nuevoForm.plan}
-                  onValueChange={(value) =>
+                  value={nuevoForm.planId}
+                  onValueChange={(value) => {
+                    const selected = planesActivos.find((p) => p.id === value);
+                    const planLabel = selected
+                      ? selected.version
+                        ? `${selected.nombre} (${selected.version})`
+                        : selected.nombre
+                      : "";
                     setNuevoForm((f) => ({
                       ...f,
-                      plan: value,
-                      precioActual: String(priceForPlan(value)),
-                    }))
-                  }
+                      planId: value,
+                      plan: planLabel,
+                      precioActual: String(selected?.precio ?? 0),
+                    }));
+                  }}
                 >
                   <SelectTrigger id="nf-plan" className={inputPanelClass}>
                     <SelectValue placeholder="Seleccionar plan" />
                   </SelectTrigger>
                   <SelectContent>
-                    {PLAN_OPTIONS.map((plan) => (
-                      <SelectItem key={plan} value={plan}>
-                        {plan}
+                    {planesActivos.map((plan) => (
+                      <SelectItem key={plan.id} value={plan.id}>
+                        {plan.version ? `${plan.nombre} (${plan.version})` : plan.nombre}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -1289,9 +1395,10 @@ export default function SociosPage() {
               <Button
                 type="button"
                 onClick={guardarNuevoSocio}
+                disabled={isPending}
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
               >
-                Guardar Socio
+                {isPending ? "Guardando..." : "Guardar Socio"}
               </Button>
             </div>
           </SheetFooter>
