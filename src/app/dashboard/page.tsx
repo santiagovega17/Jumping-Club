@@ -35,68 +35,21 @@ const COLOR_EGRESO = "#e41b68";
 const FONT_UI =
   "var(--font-sans), ui-sans-serif, system-ui, sans-serif";
 
-const proximosVencimientos = [
-  {
-    concepto: "Sueldos",
-    descripcion: "Profesores",
-    total: 120000,
-    fecha: "2026-04-25",
-  },
-  {
-    concepto: "Servicios",
-    descripcion: "Luz",
-    total: 32000,
-    fecha: "2026-04-26",
-  },
-  {
-    concepto: "Servicios",
-    descripcion: "Alquiler",
-    total: 105000,
-    fecha: "2026-04-28",
-  },
-] as const;
+type ProximoVencimientoRow = {
+  concepto: string;
+  descripcion: string;
+  total: number;
+  fecha: string;
+};
 
-const chartData = [
-  { mes: "Nov", ingresos: 780000, egresos: 210000 },
-  { mes: "Dic", ingresos: 890000, egresos: 245000 },
-  { mes: "Ene", ingresos: 920000, egresos: 265000 },
-  { mes: "Feb", ingresos: 980000, egresos: 290000 },
-  { mes: "Mar", ingresos: 1150000, egresos: 305000 },
-  { mes: "Abr", ingresos: 1250000, egresos: 320000 },
-] as const;
+type ChartMonthRow = { mes: string; ingresos: number; egresos: number };
 
-const movimientos = [
-  {
-    positive: true,
-    monto: "+ $25.000",
-    categoria: "Cuotas",
-    detalle: "Santiago Vega",
-  },
-  {
-    positive: false,
-    monto: "- $15.000",
-    categoria: "Mantenimiento",
-    detalle: "Equipamiento",
-  },
-  {
-    positive: true,
-    monto: "+ $14.500",
-    categoria: "Cuotas",
-    detalle: "Martina García",
-  },
-  {
-    positive: false,
-    monto: "- $32.000",
-    categoria: "Servicios",
-    detalle: "Limpieza mensual",
-  },
-  {
-    positive: true,
-    monto: "+ $39.000",
-    categoria: "Cuotas",
-    detalle: "Trimestral — Sofía Mena",
-  },
-] as const;
+type MovimientoResumen = {
+  positive: boolean;
+  monto: string;
+  categoria: string;
+  detalle: string;
+};
 
 function formatPesos(value: number) {
   return `$${value.toLocaleString("es-AR", { maximumFractionDigits: 0 })}`;
@@ -118,6 +71,11 @@ export default function DashboardPage() {
     setChartReady(true);
   }, []);
 
+  const proximosVencimientos: ProximoVencimientoRow[] = [];
+  const chartData: ChartMonthRow[] = [];
+  const movimientos: MovimientoResumen[] = [];
+  const tieneDatosGrafico = chartData.length > 0;
+
   return (
     <div className="min-w-0 font-sans">
       <h1 className={PAGE_TITLE_CLASS}>Dashboard</h1>
@@ -135,7 +93,7 @@ export default function DashboardPage() {
                 <div className="min-w-0 flex-1">
                   <p className={KPI_TITLE_CLASS}>Ingresos</p>
                   <p className="mt-4 text-3xl font-semibold tracking-tight tabular-nums text-[#5ab253]">
-                    $1.250.000
+                    {formatPesos(0)}
                   </p>
                 </div>
                 <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-[#5ab253]/35 bg-[#5ab253]/12 p-2.5">
@@ -148,7 +106,7 @@ export default function DashboardPage() {
                 <div className="min-w-0 flex-1">
                   <p className={KPI_TITLE_CLASS}>Egresos</p>
                   <p className="mt-4 text-3xl font-semibold tracking-tight tabular-nums text-[#e41b68]">
-                    $320.000
+                    {formatPesos(0)}
                   </p>
                 </div>
                 <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-[#e41b68]/35 bg-[#e41b68]/12 p-2.5">
@@ -160,8 +118,8 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <p className={KPI_TITLE_CLASS}>Próxima clase</p>
-                  <p className="mt-2 text-lg font-semibold text-zinc-100">19:30 HS</p>
-                  <p className="mt-1 text-sm text-zinc-400">15/20 inscriptos</p>
+                  <p className="mt-2 text-lg font-semibold text-zinc-100">—</p>
+                  <p className="mt-1 text-sm text-zinc-400">Sin datos suficientes</p>
                 </div>
                 <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-[#e41b68]/35 bg-[#e41b68]/12 p-2.5">
                   <Calendar className="size-5 text-[#e41b68]" aria-hidden />
@@ -193,16 +151,30 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {proximosVencimientos.map((item) => (
-                    <tr key={`${item.concepto}-${item.descripcion}`} className="border-b border-zinc-800/40 last:border-b-0">
-                      <td className="px-3 py-2 text-zinc-100">{item.concepto}</td>
-                      <td className="px-3 py-2 text-zinc-400">{item.descripcion}</td>
-                      <td className="px-3 py-2 text-right font-semibold text-zinc-100">
-                        {formatPesos(item.total)}
+                  {proximosVencimientos.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={4}
+                        className="px-3 py-10 text-center text-sm text-zinc-500"
+                      >
+                        Sin datos suficientes
                       </td>
-                      <td className="px-3 py-2 text-right text-zinc-400">{item.fecha}</td>
                     </tr>
-                  ))}
+                  ) : (
+                    proximosVencimientos.map((item) => (
+                      <tr
+                        key={`${item.concepto}-${item.descripcion}`}
+                        className="border-b border-zinc-800/40 last:border-b-0"
+                      >
+                        <td className="px-3 py-2 text-zinc-100">{item.concepto}</td>
+                        <td className="px-3 py-2 text-zinc-400">{item.descripcion}</td>
+                        <td className="px-3 py-2 text-right font-semibold text-zinc-100">
+                          {formatPesos(item.total)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-zinc-400">{item.fecha}</td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
               </div>
@@ -216,7 +188,7 @@ export default function DashboardPage() {
                 Comparativa de los últimos 6 meses
               </p>
               <div className="mt-4 h-[300px] w-full min-w-0 sm:h-[320px]">
-                {chartReady ? (
+                {chartReady && tieneDatosGrafico ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart
                       data={[...chartData]}
@@ -310,12 +282,16 @@ export default function DashboardPage() {
                       />
                     </BarChart>
                   </ResponsiveContainer>
-                ) : (
+                ) : !chartReady ? (
                   <div
                     className="flex h-full items-center justify-center rounded-xl border border-dashed border-white/10 bg-black/20 text-sm text-foreground/50"
                     aria-hidden
                   >
                     Preparando gráfico…
+                  </div>
+                ) : (
+                  <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-white/10 bg-black/20 px-4 text-center text-sm text-foreground/50">
+                    Sin datos suficientes
                   </div>
                 )}
               </div>
@@ -327,30 +303,36 @@ export default function DashboardPage() {
                 Entradas y salidas recientes
               </p>
               <ul className="mt-4 space-y-2">
-                {movimientos.map((mov) => (
-                  <li
-                    key={`${mov.monto}-${mov.detalle}`}
-                    className="rounded-xl border border-white/10 bg-black/15 px-3 py-3 text-sm"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-xs font-medium uppercase tracking-wide text-foreground/55">
-                          {mov.categoria}
-                        </p>
-                        <p className="mt-0.5 truncate text-foreground/85">
-                          {mov.detalle}
+                {movimientos.length === 0 ? (
+                  <li className="rounded-xl border border-dashed border-white/10 bg-black/10 px-3 py-6 text-center text-sm text-foreground/50">
+                    Sin datos suficientes
+                  </li>
+                ) : (
+                  movimientos.map((mov) => (
+                    <li
+                      key={`${mov.monto}-${mov.detalle}`}
+                      className="rounded-xl border border-white/10 bg-black/15 px-3 py-3 text-sm"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium uppercase tracking-wide text-foreground/55">
+                            {mov.categoria}
+                          </p>
+                          <p className="mt-0.5 truncate text-foreground/85">
+                            {mov.detalle}
+                          </p>
+                        </div>
+                        <p
+                          className={`shrink-0 font-semibold tabular-nums ${
+                            mov.positive ? "text-[#5ab253]" : "text-[#e41b68]"
+                          }`}
+                        >
+                          {mov.monto}
                         </p>
                       </div>
-                      <p
-                        className={`shrink-0 font-semibold tabular-nums ${
-                          mov.positive ? "text-[#5ab253]" : "text-[#e41b68]"
-                        }`}
-                      >
-                        {mov.monto}
-                      </p>
-                    </div>
-                  </li>
-                ))}
+                    </li>
+                  ))
+                )}
               </ul>
             </article>
           </section>
@@ -358,15 +340,15 @@ export default function DashboardPage() {
       ) : (
         <div className="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-[1.25fr_1fr]">
           <section className="rounded-2xl border border-zinc-800/50 bg-card p-4 md:p-8">
-            <SectionHeading>¡Hola, Santiago! Listo para saltar?</SectionHeading>
+            <SectionHeading>¡Hola! Listo para saltar?</SectionHeading>
             <p className="mt-2 text-sm text-zinc-500">
               Tu energía de hoy arranca con una buena clase. Reserva en segundos.
             </p>
 
             <div className="mt-6 rounded-xl border border-secondary/30 bg-zinc-900 p-5">
               <p className={KPI_TITLE_CLASS}>Próxima clase</p>
-              <p className="mt-2 text-lg font-semibold leading-tight text-zinc-100">18:00 HS</p>
-              <p className="mt-1 text-sm text-foreground/75">18/20 inscriptos</p>
+              <p className="mt-2 text-lg font-semibold leading-tight text-zinc-100">—</p>
+              <p className="mt-1 text-sm text-foreground/75">Sin datos suficientes</p>
             </div>
 
             <div className="mt-6 flex flex-wrap gap-3">
@@ -387,13 +369,14 @@ export default function DashboardPage() {
             <SectionHeading as="h3">Tu actividad</SectionHeading>
             <div className="mt-4 space-y-2 text-sm">
               <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2">
-                Asistencia del mes: <span className="font-semibold text-secondary">9 clases</span>
+                Asistencia del mes:{" "}
+                <span className="font-semibold text-secondary">—</span>
               </div>
               <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2">
-                Próximo vencimiento: <span className="font-semibold">30/06/2026</span>
+                Próximo vencimiento: <span className="font-semibold">—</span>
               </div>
               <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2">
-                Plan actual: <span className="font-semibold">Mensual Premium</span>
+                Plan actual: <span className="font-semibold">—</span>
               </div>
             </div>
           </section>

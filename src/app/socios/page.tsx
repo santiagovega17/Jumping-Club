@@ -210,210 +210,6 @@ function priceForPlan(plan: string) {
   return PLAN_VERSION_PRICES[plan as PlanVersion] ?? 0;
 }
 
-const sociosIniciales: Socio[] = [
-  {
-    vendedor: "María Fernández",
-    mesUltimoAumento: "2026-03",
-    nombre: "Vega, Santiago",
-    dni: "38.521.447",
-    celular: "+54 9 11 5555-1201",
-    domicilio: "Av. Corrientes 1842, Piso 3 B",
-    provincia: "Ciudad Autónoma de Buenos Aires",
-    correo: "santiago.vega@email.com",
-    plan: "Plan Full (A2)",
-    precioActual: priceForPlan("Plan Full (A2)"),
-    historialPrecios: {
-      ...createHistorialAnual(28000, 2026),
-      "2026-03": 32000,
-      "2026-04": 32000,
-      "2026-05": 32000,
-      "2026-06": 32000,
-      "2026-07": 32000,
-      "2026-08": 32000,
-      "2026-09": 32000,
-      "2026-10": 32000,
-      "2026-11": 32000,
-      "2026-12": 32000,
-    },
-    historialPlanes: createHistorialPlanes("Plan Full (A2)", 2026),
-    historialMensual: {
-      ...createHistorialMensual("Plan Full (A2)", priceForPlan("Plan Full (A2)"), 2026),
-      "2026-03": {
-        planes: [
-          { nombre: "Plan Full", monto: 20000 },
-          { nombre: "Plan Full (A2)", monto: 28000, esAumento: true },
-        ],
-      },
-    },
-    formaPagoPreferida: "Tarjeta de Crédito",
-    numeroTarjeta: "**** 1234",
-    titular: "Santiago Vega",
-    estado: "Al día",
-  },
-  {
-    vendedor: "Carlos Díaz",
-    mesUltimoAumento: "2026-01",
-    nombre: "Guzman, Luis",
-    dni: "32.104.882",
-    celular: "+54 9 11 5555-2208",
-    domicilio: "Calle San Martín 450",
-    provincia: "Buenos Aires",
-    correo: "luis.guzman@email.com",
-    plan: "Plan 2x Semana (A2)",
-    precioActual: priceForPlan("Plan 2x Semana (A2)"),
-    historialPrecios: createHistorialAnual(priceForPlan("Plan 2x Semana (A2)"), 2026),
-    historialPlanes: createHistorialPlanes("Plan 2x Semana (A2)", 2026),
-    historialMensual: createHistorialMensual(
-      "Plan 2x Semana (A2)",
-      priceForPlan("Plan 2x Semana (A2)"),
-      2026,
-    ),
-    formaPagoPreferida: "Tarjeta de Crédito",
-    numeroTarjeta: "**** 8891",
-    titular: "Luis Guzman",
-    estado: "Al día",
-  },
-  {
-    vendedor: "María Fernández",
-    mesUltimoAumento: "2026-04",
-    nombre: "Gómez, Laura",
-    dni: "41.203.991",
-    celular: "+54 9 15 4444-9910",
-    domicilio: "Rivadavia 2100",
-    provincia: "Buenos Aires",
-    correo: "laura.gomez@email.com",
-    plan: "Plan Full (A3)",
-    precioActual: priceForPlan("Plan Full (A3)"),
-    historialPrecios: {
-      ...createHistorialAnual(29000, 2026),
-      "2026-04": 33000,
-      "2026-05": 33000,
-      "2026-06": 33000,
-      "2026-07": 33000,
-      "2026-08": 33000,
-      "2026-09": 33000,
-      "2026-10": 33000,
-      "2026-11": 33000,
-      "2026-12": 33000,
-    },
-    historialPlanes: createHistorialPlanes("Plan Full (A3)", 2026),
-    historialMensual: createHistorialMensual(
-      "Plan Full (A3)",
-      priceForPlan("Plan Full (A3)"),
-      2026,
-    ),
-    formaPagoPreferida: "Débito Automático",
-    numeroTarjeta: "**** 4420",
-    titular: "Laura Gómez",
-    estado: "Vencida",
-  },
-  {
-    vendedor: "Ana Ruiz",
-    mesUltimoAumento: "2026-02",
-    nombre: "López, Nancy",
-    dni: "29.887.110",
-    celular: "+54 9 11 5555-7733",
-    domicilio: "Av. Santa Fe 3201",
-    provincia: "Ciudad Autónoma de Buenos Aires",
-    correo: "nancy.lopez@email.com",
-    plan: "Plan 3x Semana (A2)",
-    precioActual: priceForPlan("Plan 3x Semana (A2)"),
-    historialPrecios: {
-      ...createHistorialAnual(24000, 2026),
-      "2026-02": 27000,
-      "2026-03": 27000,
-      "2026-04": 27000,
-      "2026-05": 27000,
-      "2026-06": 27000,
-      "2026-07": 27000,
-      "2026-08": 27000,
-      "2026-09": 27000,
-      "2026-10": 27000,
-      "2026-11": 27000,
-      "2026-12": 27000,
-    },
-    historialPlanes: createHistorialPlanes("Plan 3x Semana (A2)", 2026),
-    historialMensual: createHistorialMensual(
-      "Plan 3x Semana (A2)",
-      priceForPlan("Plan 3x Semana (A2)"),
-      2026,
-    ),
-    formaPagoPreferida: "Transferencia",
-    numeroTarjeta: "",
-    titular: "Nancy López",
-    estado: "Al día",
-  },
-  {
-    vendedor: "Carlos Díaz",
-    mesUltimoAumento: "2026-03",
-    nombre: "Pérez, Adrián",
-    dni: "35.662.004",
-    celular: "+54 9 11 5555-0044",
-    domicilio: "Córdoba 980",
-    provincia: "Ciudad Autónoma de Buenos Aires",
-    correo: "adrian.perez@email.com",
-    plan: "Plan Full (A2)",
-    precioActual: priceForPlan("Plan Full (A2)"),
-    historialPrecios: {
-      ...createHistorialAnual(27500, 2026),
-      "2026-03": 31000,
-      "2026-04": 31000,
-      "2026-05": 31000,
-      "2026-06": 31000,
-      "2026-07": 31000,
-      "2026-08": 31000,
-      "2026-09": 31000,
-      "2026-10": 31000,
-      "2026-11": 31000,
-      "2026-12": 31000,
-    },
-    historialPlanes: createHistorialPlanes("Plan Full (A2)", 2026),
-    historialMensual: createHistorialMensual(
-      "Plan Full (A2)",
-      priceForPlan("Plan Full (A2)"),
-      2026,
-    ),
-    formaPagoPreferida: "Tarjeta de Crédito",
-    numeroTarjeta: "**** 1001",
-    titular: "Adrián Pérez",
-    estado: "Vencida",
-  },
-  {
-    vendedor: "Ana Ruiz",
-    mesUltimoAumento: "2026-05",
-    nombre: "Torres, Marisol",
-    dni: "40.119.556",
-    celular: "+54 9 11 5555-5566",
-    domicilio: "Güemes 145",
-    provincia: "Buenos Aires",
-    correo: "marisol.torres@email.com",
-    plan: "Plan 2x Semana (A2)",
-    precioActual: priceForPlan("Plan 2x Semana (A2)"),
-    historialPrecios: {
-      ...createHistorialAnual(23000, 2026),
-      "2026-05": 26000,
-      "2026-06": 26000,
-      "2026-07": 26000,
-      "2026-08": 26000,
-      "2026-09": 26000,
-      "2026-10": 26000,
-      "2026-11": 26000,
-      "2026-12": 26000,
-    },
-    historialPlanes: createHistorialPlanes("Plan 2x Semana (A2)", 2026),
-    historialMensual: createHistorialMensual(
-      "Plan 2x Semana (A2)",
-      priceForPlan("Plan 2x Semana (A2)"),
-      2026,
-    ),
-    formaPagoPreferida: "Efectivo",
-    numeroTarjeta: "",
-    titular: "Marisol Torres",
-    estado: "Al día",
-  },
-];
-
-
 const SHEET_PANEL_CLASS =
   "flex h-full w-full flex-col border-l border-border bg-card text-card-foreground sm:max-w-md";
 
@@ -554,7 +350,7 @@ export default function SociosPage() {
     return stored === "socio" ? "socio" : "administracion";
   });
 
-  const [socios, setSocios] = useState<Socio[]>(() => [...sociosIniciales]);
+  const [socios, setSocios] = useState<Socio[]>([]);
   const [query, setQuery] = useState("");
   const [sheetOpen, setSheetOpen] = useState(false);
   const [nuevoSheetOpen, setNuevoSheetOpen] = useState(false);
@@ -641,6 +437,66 @@ export default function SociosPage() {
     };
 
     loadAdminContextAndPlanes();
+  }, []);
+
+  useEffect(() => {
+    const loadSocios = async () => {
+      try {
+        const supabase = createSupabaseClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+
+        const { data: perfilAdmin } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+
+        if (!perfilAdmin?.franquicia_id) return;
+
+        const { data: rows } = await supabase
+          .from("socios")
+          .select(
+            "id,telefono,mes_ultimo_aumento,estado,perfil:perfiles(nombre,email),plan:planes(nombre,version,precio)",
+          )
+          .eq("franquicia_id", perfilAdmin.franquicia_id);
+
+        const loaded = (rows ?? []).map((row: any) => {
+          const planLabel = row.plan?.version
+            ? `${row.plan.nombre} (${row.plan.version})`
+            : (row.plan?.nombre ?? "Sin plan");
+          const precio = Number(row.plan?.precio ?? 0);
+          return {
+            vendedor: "Sin asignar",
+            mesUltimoAumento: row.mes_ultimo_aumento ?? yyyymm(new Date()),
+            nombre: row.perfil?.nombre ?? "Sin nombre",
+            dni: row.id,
+            celular: row.telefono ?? "—",
+            domicilio: "—",
+            provincia: "—",
+            correo: row.perfil?.email ?? "—",
+            plan: planLabel,
+            precioActual: precio,
+            historialPrecios: createHistorialAnual(precio, new Date().getFullYear()),
+            historialPlanes: createHistorialPlanes(planLabel, new Date().getFullYear()),
+            historialMensual: createHistorialMensual(planLabel, precio, new Date().getFullYear()),
+            formaPagoPreferida: "Efectivo" as FormaPagoPreferida,
+            numeroTarjeta: "",
+            titular: row.perfil?.nombre ?? "—",
+            estado:
+              row.estado === "activo"
+                ? ("Al día" as MembresiaEstado)
+                : ("Inactivo" as MembresiaEstado),
+          } satisfies Socio;
+        });
+        setSocios(loaded);
+      } catch {
+        setSocios([]);
+      }
+    };
+    loadSocios();
   }, []);
 
   const filtrados = useMemo(() => {
@@ -1145,7 +1001,7 @@ export default function SociosPage() {
         </div>
         {filtrados.length === 0 ? (
           <p className="px-2 py-4 text-center text-sm text-zinc-500">
-            No hay resultados para tu búsqueda o filtros.
+            No hay registros disponibles. Comienza agregando uno nuevo.
           </p>
         ) : null}
       </div>

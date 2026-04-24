@@ -39,7 +39,6 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
-const fallbackClasesBase = ["09:00", "10:30", "12:00", "16:00", "18:00", "19:30"];
 const capacidadTotal = 20;
 const CONFIG_STORAGE_KEY = "jumping-club-config-v1";
 type Role = "administracion" | "socio";
@@ -56,15 +55,6 @@ type ClaseTemplateConfig = {
   nombre: string;
   instructorId: string;
   horario: string;
-};
-
-const initialInscriptos: Record<string, string[]> = {
-  "09:00": ["Santiago Vega", "Luis Guzman", "Laura Gomez"],
-  "10:30": ["Nora Medina", "Juan Perez"],
-  "12:00": [],
-  "16:00": ["Lucia Torres"],
-  "18:00": ["Matias Roldan", "Clara Rios", "Agustin Luna"],
-  "19:30": [],
 };
 
 function getDiasSelector() {
@@ -133,9 +123,9 @@ export default function CalendarioPage() {
   const [clasesTemplateConfig, setClasesTemplateConfig] = useState<ClaseTemplateConfig[]>([]);
   const [clasesExtraPorDia, setClasesExtraPorDia] = useState<Record<string, string[]>>({});
   const [canceladosPorDia, setCanceladosPorDia] = useState<Record<string, string[]>>({});
-  const [inscriptosPorClase, setInscriptosPorClase] = useState<Record<string, string[]>>(
-    () => ({ ...initialInscriptos }),
-  );
+  const [inscriptosPorClase, setInscriptosPorClase] = useState<
+    Record<string, string[]>
+  >({});
   const [cupoMaximoPorClase, setCupoMaximoPorClase] = useState<Record<string, number>>({});
   const [detalleClasePorDia, setDetalleClasePorDia] = useState<
     Record<string, Record<string, { nombre: string; instructorId: string }>>
@@ -180,7 +170,7 @@ export default function CalendarioPage() {
   }, []);
 
   const clasesBase = useMemo(() => {
-    if (clasesTemplateConfig.length === 0) return fallbackClasesBase;
+    if (clasesTemplateConfig.length === 0) return [];
     return [...new Set(clasesTemplateConfig.map((tpl) => tpl.horario))].sort();
   }, [clasesTemplateConfig]);
 
@@ -200,15 +190,13 @@ export default function CalendarioPage() {
   }, [canceladosPorDia, clasesExtraPorDia, selectedDateKey]);
 
   const cuposPorClase = useMemo(() => {
-    const seed = selectedDate.toISOString().slice(0, 10).replaceAll("-", "");
-    return clasesActivasDelDia.map((hora, index) => {
-      const factor = Number(seed.slice(-2)) + index * 2 + hora.length;
-      const usados = 3 + (factor % 10);
+    return clasesActivasDelDia.map((hora) => {
       const max = cupoMaximoPorClase[hora] ?? capacidadTotal;
-      const ocupados = Math.min(max, usados);
+      const lista = inscriptosPorClase[hora] ?? [];
+      const ocupados = Math.min(max, lista.length);
       return { hora, max, ocupados };
     });
-  }, [clasesActivasDelDia, cupoMaximoPorClase, selectedDate]);
+  }, [clasesActivasDelDia, cupoMaximoPorClase, inscriptosPorClase]);
 
   const getClaseInfo = (hora: string, dateKey: string) => {
     const override = detalleClasePorDia[dateKey]?.[hora];
@@ -217,7 +205,7 @@ export default function CalendarioPage() {
     if (template) {
       return { nombre: template.nombre, instructorId: template.instructorId };
     }
-    return { nombre: "Clase general", instructorId: "" };
+    return { nombre: "", instructorId: "" };
   };
 
   const clasesProgramadasMes = useMemo(() => {
@@ -502,6 +490,12 @@ export default function CalendarioPage() {
           </div>
 
           <div className="mt-5 flex w-full flex-col gap-3">
+            {cuposPorClase.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-white/10 bg-black/10 px-4 py-8 text-center text-sm text-foreground/55">
+                No hay clases programadas para este día. Configurá plantillas en
+                Configuración o agregá una clase con el botón correspondiente.
+              </p>
+            ) : null}
             {cuposPorClase.map(({ hora, max, ocupados }) => {
               const isSelected = selectedClase === hora;
               const porcentaje = max > 0 ? Math.min(100, Math.round((ocupados / max) * 100)) : 0;
@@ -527,7 +521,11 @@ export default function CalendarioPage() {
                       {hora}
                     </p>
                     <p className="text-sm text-zinc-400">
-                      {info.nombre} • {instructorNombreById[info.instructorId] ?? "Sin instructor"}
+                      {info.nombre.trim()
+                        ? info.nombre
+                        : "Sin nombre"}{" "}
+                      •{" "}
+                      {instructorNombreById[info.instructorId] ?? "Sin instructor"}
                     </p>
                   </div>
                   <div className="flex min-w-[80px] flex-col items-end gap-2">

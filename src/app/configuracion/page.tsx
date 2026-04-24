@@ -135,42 +135,19 @@ const defaultSchedules: Record<DayId, DaySchedule> = {
 };
 
 const defaultConceptos: ClubConfig["conceptosCaja"] = {
-  ingresos: {
-    Cuotas: ["Mensual", "Semanal", "Matrícula"],
-    Ventas: ["Indumentaria", "Bebidas"],
-  },
-  egresos: {
-    Servicios: ["Luz", "Agua", "Alquiler"],
-    Sueldos: ["Profesores", "Administración"],
-  },
+  ingresos: {},
+  egresos: {},
 };
 
 const defaultConfig: ClubConfig = {
-  pases: [
-    { id: "pase-1", nombre: "Plan Full", precio: 25000 },
-    { id: "pase-2", nombre: "Plan Básico", precio: 15000 },
-  ],
-  formasPago: [
-    "Efectivo",
-    "Transferencia",
-    "Débito",
-    "Crédito",
-    "Mercado Pago",
-    "Débito automático",
-    "Otro",
-  ],
+  pases: [],
+  formasPago: [],
   conceptosCaja: defaultConceptos,
-  instructores: [
-    { id: "inst-1", nombre: "Lucía Torres", especialidad: "Funcional" },
-    { id: "inst-2", nombre: "Matías Roldán", especialidad: "Cross" },
-  ],
-  clasesTemplate: [
-    { id: "tpl-1", nombre: "Funcional", instructorId: "inst-1", horario: "09:00" },
-    { id: "tpl-2", nombre: "Cross", instructorId: "inst-2", horario: "18:00" },
-  ],
+  instructores: [],
+  clasesTemplate: [],
   schedules: defaultSchedules,
   cantidadClasesDia: "3",
-  horariosFijos: ["09:00", "10:30", "12:00"],
+  horariosFijos: [],
   cupoMaximo: "20",
   aplicarCupoNuevas: true,
 };
@@ -395,6 +372,22 @@ export default function ConfiguracionPage() {
               id: p.id,
               nombre: p.version ? `${p.nombre} (${p.version})` : p.nombre,
               precio: Math.round(Number(p.precio) || 0),
+            })),
+          }));
+        }
+
+        const { data: instructores, error: instructoresError } = await supabase
+          .from("instructores")
+          .select("id,nombre,estado")
+          .eq("franquicia_id", perfil.franquicia_id);
+
+        if (!instructoresError && instructores) {
+          setConfig((c) => ({
+            ...c,
+            instructores: instructores.map((inst) => ({
+              id: inst.id,
+              nombre: inst.nombre,
+              especialidad: "",
             })),
           }));
         }
@@ -1179,7 +1172,7 @@ export default function ConfiguracionPage() {
                           colSpan={3}
                           className="py-8 text-center text-sm text-zinc-500"
                         >
-                          No hay instructores cargados.
+                          No hay registros disponibles. Comienza agregando uno nuevo.
                         </TableCell>
                       </TableRow>
                     ) : (

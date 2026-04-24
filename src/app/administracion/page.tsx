@@ -75,6 +75,7 @@ import {
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 
 const FONT_UI =
   "var(--font-sans), ui-sans-serif, system-ui, sans-serif";
@@ -97,26 +98,63 @@ const MESES = [
   { value: "12", label: "Diciembre" },
 ] as const;
 
-const FORMAS_PAGO = [
-  "Efectivo",
-  "Transferencia",
-  "Tarjeta",
-  "Mercado Pago",
-  "Débito automático",
-  "Otro",
-] as const;
+const CONFIG_LOCAL_KEY = "jumping-club-config-v1";
 
-/** Catálogo único: conceptos y descripciones permitidos (sin texto libre). */
-const CONCEPTOS_FINANCIEROS = {
-  INGRESOS: {
-    Cuotas: ["Mensual", "Semanal", "Matrícula"],
-    Ventas: ["Indumentaria", "Bebidas"],
-  },
-  EGRESOS: {
-    Servicios: ["Luz", "Agua", "Alquiler"],
-    Sueldos: ["Profesores", "Administración"],
-  },
-} as const;
+type ConceptosFinancieros = {
+  INGRESOS: Record<string, string[]>;
+  EGRESOS: Record<string, string[]>;
+};
+
+const EMPTY_CONCEPTOS: ConceptosFinancieros = {
+  INGRESOS: {},
+  EGRESOS: {},
+};
+
+function sanitizeConceptBranchRecord(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k !== "string" || !k.trim()) continue;
+    if (!Array.isArray(v)) out[k] = [];
+    else {
+      out[k] = v.filter(
+        (x): x is string => typeof x === "string" && Boolean(x.trim()),
+      );
+    }
+  }
+  return out;
+}
+
+function loadCajaCatalogFromStorage(): {
+  conceptos: ConceptosFinancieros;
+  formasPago: string[];
+} {
+  if (typeof window === "undefined") {
+    return { conceptos: EMPTY_CONCEPTOS, formasPago: [] };
+  }
+  try {
+    const raw = window.localStorage.getItem(CONFIG_LOCAL_KEY);
+    if (!raw) return { conceptos: EMPTY_CONCEPTOS, formasPago: [] };
+    const p = JSON.parse(raw) as {
+      conceptosCaja?: { ingresos?: unknown; egresos?: unknown };
+      formasPago?: unknown;
+    };
+    const formasPago = Array.isArray(p.formasPago)
+      ? p.formasPago.filter(
+          (x): x is string => typeof x === "string" && Boolean(x.trim()),
+        )
+      : [];
+    return {
+      conceptos: {
+        INGRESOS: sanitizeConceptBranchRecord(p.conceptosCaja?.ingresos),
+        EGRESOS: sanitizeConceptBranchRecord(p.conceptosCaja?.egresos),
+      },
+      formasPago,
+    };
+  } catch {
+    return { conceptos: EMPTY_CONCEPTOS, formasPago: [] };
+  }
+}
 
 type CategoriaMov = "Ingreso" | "Egreso";
 
@@ -134,41 +172,50 @@ type Movimiento = {
   socio: string;
 };
 
-function branchFor(categoria: CategoriaMov) {
-  return categoria === "Ingreso"
-    ? CONCEPTOS_FINANCIEROS.INGRESOS
-    : CONCEPTOS_FINANCIEROS.EGRESOS;
+function branchForCat(
+  categoria: CategoriaMov,
+  catalog: ConceptosFinancieros,
+): Record<string, string[]> {
+  return categoria === "Ingreso" ? catalog.INGRESOS : catalog.EGRESOS;
 }
 
-function conceptosKeys(categoria: CategoriaMov): string[] {
-  return Object.keys(branchFor(categoria));
+function conceptosKeysFrom(
+  categoria: CategoriaMov,
+  catalog: ConceptosFinancieros,
+): string[] {
+  return Object.keys(branchForCat(categoria, catalog));
 }
 
-function descripcionesFor(
+function descripcionesForCat(
   categoria: CategoriaMov,
   concepto: string,
-): readonly string[] {
-  const b = branchFor(categoria) as Record<string, readonly string[]>;
+  catalog: ConceptosFinancieros,
+): string[] {
+  const b = branchForCat(categoria, catalog);
   return b[concepto] ?? [];
 }
 
-function firstConceptoDesc(categoria: CategoriaMov): {
+function firstConceptoDescFrom(
+  categoria: CategoriaMov,
+  catalog: ConceptosFinancieros,
+): {
   concepto: string;
   descripcion: string;
 } {
-  const keys = conceptosKeys(categoria);
+  const keys = conceptosKeysFrom(categoria, catalog);
   const concepto = keys[0] ?? "";
-  const descList = descripcionesFor(categoria, concepto);
+  const descList = descripcionesForCat(categoria, concepto, catalog);
   const descripcion = descList[0] ?? "";
   return { concepto, descripcion };
 }
 
-function isValidConceptoDescripcion(
+function isValidConceptoDescripcionFrom(
   categoria: CategoriaMov,
   concepto: string,
   descripcion: string,
+  catalog: ConceptosFinancieros,
 ) {
-  const list = descripcionesFor(categoria, concepto);
+  const list = descripcionesForCat(categoria, concepto, catalog);
   return list.includes(descripcion);
 }
 
@@ -198,15 +245,18 @@ function isoToDisplay(iso: string) {
   return `${d}/${mo}/${y}`;
 }
 
-function emptyDraft(): FormDraft {
-  const { concepto, descripcion } = firstConceptoDesc("Ingreso");
+function emptyDraftFrom(
+  catalog: ConceptosFinancieros,
+  formasPago: string[],
+): FormDraft {
+  const { concepto, descripcion } = firstConceptoDescFrom("Ingreso", catalog);
   return {
     fecha: new Date().toISOString().slice(0, 10),
     concepto,
     descripcion,
     categoria: "Ingreso",
     monto: 0,
-    formaPago: "Efectivo",
+    formaPago: formasPago[0] ?? "",
     observaciones: "",
     estado: "Pagado",
     fechaVencimiento: "",
@@ -220,111 +270,6 @@ function movimientoToDraft(m: Movimiento): FormDraft {
 }
 
 const PIE_PALETTE = ["#e41b68", "#b81858", "#ff6ba8", "#c084fc", "#38bdf8"];
-
-const initialMovimientos: Movimiento[] = [
-  {
-    id: "1",
-    fecha: "2026-04-18",
-    concepto: "Cuotas",
-    descripcion: "Mensual",
-    categoria: "Ingreso",
-    monto: 14_500,
-    formaPago: "Transferencia",
-    observaciones: "Acreditado mismo día.",
-    estado: "Pagado",
-    fechaVencimiento: "",
-    socio: "Santiago Vega",
-  },
-  {
-    id: "2",
-    fecha: "2026-04-17",
-    concepto: "Servicios",
-    descripcion: "Luz",
-    categoria: "Egreso",
-    monto: 32_000,
-    formaPago: "Transferencia",
-    observaciones: "",
-    estado: "Pagado",
-    fechaVencimiento: "",
-    socio: "",
-  },
-  {
-    id: "3",
-    fecha: "2026-04-16",
-    concepto: "Cuotas",
-    descripcion: "Mensual",
-    categoria: "Ingreso",
-    monto: 25_000,
-    formaPago: "Efectivo",
-    observaciones: "Esperando recibo firmado.",
-    estado: "Pendiente",
-    fechaVencimiento: "2026-04-30",
-    socio: "Martina García",
-  },
-  {
-    id: "4",
-    fecha: "2026-04-15",
-    concepto: "Servicios",
-    descripcion: "Agua",
-    categoria: "Egreso",
-    monto: 55_000,
-    formaPago: "Tarjeta",
-    observaciones: "",
-    estado: "Pagado",
-    fechaVencimiento: "",
-    socio: "",
-  },
-  {
-    id: "5",
-    fecha: "2026-04-14",
-    concepto: "Servicios",
-    descripcion: "Alquiler",
-    categoria: "Egreso",
-    monto: 105_000,
-    formaPago: "Transferencia",
-    observaciones: "Contrato anual prorrateado.",
-    estado: "Pagado",
-    fechaVencimiento: "",
-    socio: "",
-  },
-  {
-    id: "6",
-    fecha: "2026-04-10",
-    concepto: "Sueldos",
-    descripcion: "Profesores",
-    categoria: "Egreso",
-    monto: 120_000,
-    formaPago: "Transferencia",
-    observaciones: "",
-    estado: "Pendiente",
-    fechaVencimiento: "2026-04-25",
-    socio: "",
-  },
-  {
-    id: "7",
-    fecha: "2026-03-28",
-    concepto: "Cuotas",
-    descripcion: "Matrícula",
-    categoria: "Ingreso",
-    monto: 39_000,
-    formaPago: "Mercado Pago",
-    observaciones: "",
-    estado: "Pagado",
-    fechaVencimiento: "",
-    socio: "Sofía Mena",
-  },
-];
-
-const SOCIOS_CAJA = [
-  "Santiago Vega",
-  "Luis Guzman",
-  "Laura Gomez",
-  "Nancy López",
-  "Adrián Pérez",
-  "Marisol Torres",
-  "Martina García",
-  "Sofía Mena",
-] as const;
 
 function filterByPeriod(
   list: Movimiento[],
@@ -358,12 +303,19 @@ export default function AdministracionPage() {
   const [month, setMonth] = useState(defaultMonth);
   const [vistaAnual, setVistaAnual] = useState(false);
   const [filtroProximosVencimientos, setFiltroProximosVencimientos] = useState(false);
-  const [movimientos, setMovimientos] = useState<Movimiento[]>(initialMovimientos);
+  const [movimientos, setMovimientos] = useState<Movimiento[]>([]);
+  const [sociosCaja, setSociosCaja] = useState<string[]>([]);
+
+  const [conceptosCatalog, setConceptosCatalog] =
+    useState<ConceptosFinancieros>(EMPTY_CONCEPTOS);
+  const [formasPagoList, setFormasPagoList] = useState<string[]>([]);
 
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheetMode, setSheetMode] = useState<"edit" | "new">("edit");
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<FormDraft>(emptyDraft());
+  const [draft, setDraft] = useState<FormDraft>(() =>
+    emptyDraftFrom(EMPTY_CONCEPTOS, []),
+  );
   const [socioComboboxOpen, setSocioComboboxOpen] = useState(false);
   const [isEditingMovimiento, setIsEditingMovimiento] = useState(false);
 
@@ -374,6 +326,79 @@ export default function AdministracionPage() {
   const [chartReady, setChartReady] = useState(false);
   useEffect(() => {
     setChartReady(true);
+  }, []);
+
+  useEffect(() => {
+    const syncCatalog = () => {
+      const { conceptos, formasPago } = loadCajaCatalogFromStorage();
+      setConceptosCatalog(conceptos);
+      setFormasPagoList(formasPago);
+    };
+    syncCatalog();
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === CONFIG_LOCAL_KEY) syncCatalog();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  useEffect(() => {
+    if (formasPagoList.length === 0) return;
+    setDraft((d) =>
+      formasPagoList.includes(d.formaPago)
+        ? d
+        : { ...d, formaPago: formasPagoList[0] ?? "" },
+    );
+  }, [formasPagoList]);
+
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const supabase = createSupabaseClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+
+        const { data: perfilAdmin } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+        if (!perfilAdmin?.franquicia_id) return;
+
+        const { data: pagos } = await supabase
+          .from("pagos")
+          .select("id,monto,nombre_plan_historico,mes_correspondiente,fecha_pago,socio:socios(perfil:perfiles(nombre))")
+          .eq("franquicia_id", perfilAdmin.franquicia_id);
+
+        const mappedMovs: Movimiento[] = (pagos ?? []).map((p: any) => ({
+          id: p.id,
+          fecha: p.fecha_pago?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),
+          concepto: "Cuotas",
+          descripcion: p.nombre_plan_historico ?? "Mensual",
+          categoria: "Ingreso",
+          monto: Number(p.monto) || 0,
+          formaPago: "",
+          observaciones: "",
+          estado: "Pagado",
+          fechaVencimiento: "",
+          socio: p.socio?.perfil?.nombre ?? "",
+        }));
+        setMovimientos(mappedMovs);
+
+        const { data: perfilesSocios } = await supabase
+          .from("perfiles")
+          .select("nombre")
+          .eq("franquicia_id", perfilAdmin.franquicia_id)
+          .eq("rol", "socio");
+        setSociosCaja((perfilesSocios ?? []).map((s) => s.nombre));
+      } catch {
+        setMovimientos([]);
+        setSociosCaja([]);
+      }
+    };
+    loadData();
   }, []);
 
   const movimientosPeriodo = useMemo(
@@ -477,37 +502,62 @@ export default function AdministracionPage() {
   const resultadoNetoCons = totalIngresosCons - totalEgresosCons;
 
   const openNew = useCallback(() => {
+    const { conceptos, formasPago } = loadCajaCatalogFromStorage();
+    setConceptosCatalog(conceptos);
+    setFormasPagoList(formasPago);
     setConsolidadoOpen(false);
     setSheetMode("new");
     setEditingId(null);
-    setDraft(emptyDraft());
+    setDraft(emptyDraftFrom(conceptos, formasPago));
     setIsEditingMovimiento(true);
     setSheetOpen(true);
   }, []);
 
-  const openEdit = useCallback((m: Movimiento) => {
-    setConsolidadoOpen(false);
-    setSheetMode("edit");
-    setEditingId(m.id);
-    let d = movimientoToDraft(m);
-    if (!isValidConceptoDescripcion(m.categoria, m.concepto, m.descripcion)) {
-      const fb = firstConceptoDesc(m.categoria);
-      d = { ...d, concepto: fb.concepto, descripcion: fb.descripcion };
-    }
-    setDraft(d);
-    setIsEditingMovimiento(false);
-    setSheetOpen(true);
-  }, []);
+  const openEdit = useCallback(
+    (m: Movimiento) => {
+      const { conceptos, formasPago } = loadCajaCatalogFromStorage();
+      setConceptosCatalog(conceptos);
+      setFormasPagoList(formasPago);
+      setConsolidadoOpen(false);
+      setSheetMode("edit");
+      setEditingId(m.id);
+      let d = movimientoToDraft(m);
+      if (
+        !isValidConceptoDescripcionFrom(
+          m.categoria,
+          m.concepto,
+          m.descripcion,
+          conceptos,
+        )
+      ) {
+        const fb = firstConceptoDescFrom(m.categoria, conceptos);
+        d = { ...d, concepto: fb.concepto, descripcion: fb.descripcion };
+      }
+      if (
+        formasPago.length > 0 &&
+        (!d.formaPago || !formasPago.includes(d.formaPago))
+      ) {
+        d = { ...d, formaPago: formasPago[0] ?? "" };
+      }
+      setDraft(d);
+      setIsEditingMovimiento(false);
+      setSheetOpen(true);
+    },
+    [],
+  );
 
   const saveDraft = useCallback(() => {
     const montoNum = Math.abs(Number(draft.monto) || 0);
     if (
       montoNum === 0 ||
-      !isValidConceptoDescripcion(
+      !isValidConceptoDescripcionFrom(
         draft.categoria,
         draft.concepto,
         draft.descripcion,
-      )
+        conceptosCatalog,
+      ) ||
+      (formasPagoList.length > 0 &&
+        (!draft.formaPago || !formasPagoList.includes(draft.formaPago)))
     ) {
       return;
     }
@@ -549,7 +599,7 @@ export default function AdministracionPage() {
     } else {
       toast.success("Movimiento actualizado correctamente");
     }
-  }, [draft, editingId, sheetMode]);
+  }, [conceptosCatalog, draft, editingId, formasPagoList, sheetMode]);
 
   const deleteMovimiento = useCallback(() => {
     if (sheetMode !== "edit" || !editingId) return;
@@ -558,17 +608,25 @@ export default function AdministracionPage() {
     toast.success("Movimiento eliminado");
   }, [editingId, sheetMode]);
 
-  const draftConceptoList = conceptosKeys(draft.categoria);
-  const draftDescList = descripcionesFor(draft.categoria, draft.concepto);
+  const draftConceptoList = conceptosKeysFrom(draft.categoria, conceptosCatalog);
+  const draftDescList = descripcionesForCat(
+    draft.categoria,
+    draft.concepto,
+    conceptosCatalog,
+  );
   const fieldsDisabled = sheetMode === "edit" && !isEditingMovimiento;
 
   const saveDisabled =
     !(Number(draft.monto) > 0) ||
-    !isValidConceptoDescripcion(
+    !isValidConceptoDescripcionFrom(
       draft.categoria,
       draft.concepto,
       draft.descripcion,
+      conceptosCatalog,
     ) ||
+    (formasPagoList.length > 0 &&
+      (!draft.formaPago || !formasPagoList.includes(draft.formaPago))) ||
+    (formasPagoList.length === 0 && sheetMode === "new") ||
     (isPagoCuota(draft.categoria, draft.concepto) && !draft.socio);
 
   const periodoLabel = vistaAnual
@@ -832,7 +890,7 @@ export default function AdministracionPage() {
                 {filtrados.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="py-8 text-center text-zinc-500">
-                      No hay movimientos en este período.
+                      No hay movimientos registrados.
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -1190,7 +1248,10 @@ export default function AdministracionPage() {
                 <Select
                   value={draft.categoria}
                   onValueChange={(v: CategoriaMov) => {
-                    const { concepto, descripcion } = firstConceptoDesc(v);
+                    const { concepto, descripcion } = firstConceptoDescFrom(
+                      v,
+                      conceptosCatalog,
+                    );
                     setDraft((d) => ({
                       ...d,
                       categoria: v,
@@ -1236,7 +1297,11 @@ export default function AdministracionPage() {
               <Select
                 value={draft.concepto}
                 onValueChange={(concepto) => {
-                  const list = descripcionesFor(draft.categoria, concepto);
+                  const list = descripcionesForCat(
+                    draft.categoria,
+                    concepto,
+                    conceptosCatalog,
+                  );
                   const descripcion = list.includes(draft.descripcion)
                     ? draft.descripcion
                     : (list[0] ?? "");
@@ -1313,7 +1378,7 @@ export default function AdministracionPage() {
                       <CommandList>
                         <CommandEmpty>No se encontraron socios.</CommandEmpty>
                         <CommandGroup>
-                          {SOCIOS_CAJA.map((socio) => (
+                          {sociosCaja.map((socio) => (
                             <CommandItem
                               key={socio}
                               value={socio}
@@ -1341,17 +1406,23 @@ export default function AdministracionPage() {
             <div className="space-y-1.5">
               <Label className={LABEL_TECH}>Forma de pago</Label>
               <Select
-                value={draft.formaPago}
+                value={draft.formaPago || undefined}
                 onValueChange={(v) =>
                   setDraft((d) => ({ ...d, formaPago: v }))
                 }
-                disabled={fieldsDisabled}
+                disabled={fieldsDisabled || formasPagoList.length === 0}
               >
                 <SelectTrigger>
-                  <SelectValue />
+                  <SelectValue
+                    placeholder={
+                      formasPagoList.length === 0
+                        ? "Configurá formas de pago en Configuración"
+                        : undefined
+                    }
+                  />
                 </SelectTrigger>
                 <SelectContent>
-                  {FORMAS_PAGO.map((fp) => (
+                  {formasPagoList.map((fp) => (
                     <SelectItem key={fp} value={fp}>
                       {fp}
                     </SelectItem>
