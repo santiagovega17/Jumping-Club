@@ -11,31 +11,53 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (email === "admin@gmail.com" && password === "123") {
-      sessionStorage.setItem("userRole", "admin");
-      localStorage.setItem("jumpingClubRole", "administracion");
-      toast.success("Bienvenido Administrador");
-      router.push("/dashboard");
-      return;
-    }
+    setIsLoading(true);
+    try {
+      const supabase = createSupabaseClient();
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-    if (email === "socio@gmail.com" && password === "123") {
-      sessionStorage.setItem("userRole", "socio");
-      localStorage.setItem("jumpingClubRole", "socio");
-      toast.success("Bienvenido Socio");
-      router.push("/dashboard");
-      return;
-    }
+      if (error || !data.user) {
+        toast.error("Credenciales incorrectas");
+        return;
+      }
 
-    toast.error("Credenciales incorrectas");
+      const { data: perfil, error: perfilError } = await supabase
+        .from("perfiles")
+        .select("rol")
+        .eq("id", data.user.id)
+        .single();
+
+      if (perfilError || !perfil?.rol) {
+        toast.error("No se pudo obtener el perfil del usuario");
+        return;
+      }
+
+      const isAdminRole =
+        perfil.rol === "admin_global" || perfil.rol === "admin_franquicia";
+      sessionStorage.setItem("userRole", isAdminRole ? "admin" : "socio");
+      localStorage.setItem(
+        "jumpingClubRole",
+        isAdminRole ? "administracion" : "socio",
+      );
+
+      toast.success(isAdminRole ? "Bienvenido Administrador" : "Bienvenido Socio");
+      router.push("/dashboard");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -77,9 +99,10 @@ export default function LoginPage() {
             </div>
             <Button
               type="submit"
+              disabled={isLoading}
               className="w-full uppercase tracking-wider font-bold bg-[#e41b68] hover:bg-[#c21455] text-white"
             >
-              Iniciar sesión
+              {isLoading ? "Ingresando..." : "Iniciar sesión"}
             </Button>
           </form>
         </CardContent>
