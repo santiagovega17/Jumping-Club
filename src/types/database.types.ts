@@ -78,18 +78,21 @@ export type Database = {
           franquicia_id: string | null;
           nombre: string;
           estado: string | null;
+          especialidad: string | null;
         };
         Insert: {
           id?: string;
           franquicia_id?: string | null;
           nombre: string;
           estado?: string | null;
+          especialidad?: string | null;
         };
         Update: {
           id?: string;
           franquicia_id?: string | null;
           nombre?: string;
           estado?: string | null;
+          especialidad?: string | null;
         };
         Relationships: [
           {
@@ -97,6 +100,130 @@ export type Database = {
             columns: ["franquicia_id"];
             isOneToOne: false;
             referencedRelation: "franquicias";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      formas_pago: {
+        Row: {
+          id: string;
+          franquicia_id: string;
+          nombre: string;
+          orden: number;
+          activo: boolean;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          franquicia_id: string;
+          nombre: string;
+          orden?: number;
+          activo?: boolean;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          franquicia_id?: string;
+          nombre?: string;
+          orden?: number;
+          activo?: boolean;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "formas_pago_franquicia_id_fkey";
+            columns: ["franquicia_id"];
+            isOneToOne: false;
+            referencedRelation: "franquicias";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      conceptos_caja: {
+        Row: {
+          id: string;
+          franquicia_id: string;
+          tipo: "ingreso" | "egreso";
+          concepto: string;
+          descripcion: string;
+          orden: number;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          franquicia_id: string;
+          tipo: "ingreso" | "egreso";
+          concepto: string;
+          descripcion: string;
+          orden?: number;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          franquicia_id?: string;
+          tipo?: "ingreso" | "egreso";
+          concepto?: string;
+          descripcion?: string;
+          orden?: number;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "conceptos_caja_franquicia_id_fkey";
+            columns: ["franquicia_id"];
+            isOneToOne: false;
+            referencedRelation: "franquicias";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      plantillas_clases: {
+        Row: {
+          id: string;
+          franquicia_id: string;
+          nombre: string;
+          instructor_id: string;
+          horario: string;
+          cupo_maximo: number | null;
+          orden: number;
+          activo: boolean;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          franquicia_id: string;
+          nombre: string;
+          instructor_id: string;
+          horario: string;
+          cupo_maximo?: number | null;
+          orden?: number;
+          activo?: boolean;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          franquicia_id?: string;
+          nombre?: string;
+          instructor_id?: string;
+          horario?: string;
+          cupo_maximo?: number | null;
+          orden?: number;
+          activo?: boolean;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "plantillas_clases_franquicia_id_fkey";
+            columns: ["franquicia_id"];
+            isOneToOne: false;
+            referencedRelation: "franquicias";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "plantillas_clases_instructor_id_fkey";
+            columns: ["instructor_id"];
+            isOneToOne: false;
+            referencedRelation: "instructores";
             referencedColumns: ["id"];
           },
         ];
@@ -288,3 +415,6 @@ export type Database = {
 
 export type Perfil = Database["public"]["Tables"]["perfiles"]["Row"];
 export type Socio = Database["public"]["Tables"]["socios"]["Row"];
+export type FormaPago = Database["public"]["Tables"]["formas_pago"]["Row"];
+export type ConceptoCaja = Database["public"]["Tables"]["conceptos_caja"]["Row"];
+export type PlantillaClase = Database["public"]["Tables"]["plantillas_clases"]["Row"];

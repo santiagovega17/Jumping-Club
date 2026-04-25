@@ -76,6 +76,11 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
+import {
+  EMPTY_CONCEPTOS,
+  type ConceptosFinancieros,
+  loadCajaCatalogForFranquicia,
+} from "@/lib/franquicia-catalogo";
 
 const FONT_UI =
   "var(--font-sans), ui-sans-serif, system-ui, sans-serif";
@@ -97,64 +102,6 @@ const MESES = [
   { value: "11", label: "Noviembre" },
   { value: "12", label: "Diciembre" },
 ] as const;
-
-const CONFIG_LOCAL_KEY = "jumping-club-config-v1";
-
-type ConceptosFinancieros = {
-  INGRESOS: Record<string, string[]>;
-  EGRESOS: Record<string, string[]>;
-};
-
-const EMPTY_CONCEPTOS: ConceptosFinancieros = {
-  INGRESOS: {},
-  EGRESOS: {},
-};
-
-function sanitizeConceptBranchRecord(raw: unknown): Record<string, string[]> {
-  if (!raw || typeof raw !== "object") return {};
-  const out: Record<string, string[]> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof k !== "string" || !k.trim()) continue;
-    if (!Array.isArray(v)) out[k] = [];
-    else {
-      out[k] = v.filter(
-        (x): x is string => typeof x === "string" && Boolean(x.trim()),
-      );
-    }
-  }
-  return out;
-}
-
-function loadCajaCatalogFromStorage(): {
-  conceptos: ConceptosFinancieros;
-  formasPago: string[];
-} {
-  if (typeof window === "undefined") {
-    return { conceptos: EMPTY_CONCEPTOS, formasPago: [] };
-  }
-  try {
-    const raw = window.localStorage.getItem(CONFIG_LOCAL_KEY);
-    if (!raw) return { conceptos: EMPTY_CONCEPTOS, formasPago: [] };
-    const p = JSON.parse(raw) as {
-      conceptosCaja?: { ingresos?: unknown; egresos?: unknown };
-      formasPago?: unknown;
-    };
-    const formasPago = Array.isArray(p.formasPago)
-      ? p.formasPago.filter(
-          (x): x is string => typeof x === "string" && Boolean(x.trim()),
-        )
-      : [];
-    return {
-      conceptos: {
-        INGRESOS: sanitizeConceptBranchRecord(p.conceptosCaja?.ingresos),
-        EGRESOS: sanitizeConceptBranchRecord(p.conceptosCaja?.egresos),
-      },
-      formasPago,
-    };
-  } catch {
-    return { conceptos: EMPTY_CONCEPTOS, formasPago: [] };
-  }
-}
 
 type CategoriaMov = "Ingreso" | "Egreso";
 
@@ -329,20 +276,6 @@ export default function AdministracionPage() {
   }, []);
 
   useEffect(() => {
-    const syncCatalog = () => {
-      const { conceptos, formasPago } = loadCajaCatalogFromStorage();
-      setConceptosCatalog(conceptos);
-      setFormasPagoList(formasPago);
-    };
-    syncCatalog();
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === CONFIG_LOCAL_KEY) syncCatalog();
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  useEffect(() => {
     if (formasPagoList.length === 0) return;
     setDraft((d) =>
       formasPagoList.includes(d.formaPago)
@@ -366,6 +299,13 @@ export default function AdministracionPage() {
           .eq("id", user.id)
           .single();
         if (!perfilAdmin?.franquicia_id) return;
+
+        const { conceptos, formasPago } = await loadCajaCatalogForFranquicia(
+          supabase,
+          perfilAdmin.franquicia_id,
+        );
+        setConceptosCatalog(conceptos);
+        setFormasPagoList(formasPago);
 
         const { data: pagos } = await supabase
           .from("pagos")
@@ -396,6 +336,8 @@ export default function AdministracionPage() {
       } catch {
         setMovimientos([]);
         setSociosCaja([]);
+        setConceptosCatalog(EMPTY_CONCEPTOS);
+        setFormasPagoList([]);
       }
     };
     loadData();
@@ -502,49 +444,90 @@ export default function AdministracionPage() {
   const resultadoNetoCons = totalIngresosCons - totalEgresosCons;
 
   const openNew = useCallback(() => {
-    const { conceptos, formasPago } = loadCajaCatalogFromStorage();
-    setConceptosCatalog(conceptos);
-    setFormasPagoList(formasPago);
     setConsolidadoOpen(false);
     setSheetMode("new");
     setEditingId(null);
-    setDraft(emptyDraftFrom(conceptos, formasPago));
     setIsEditingMovimiento(true);
     setSheetOpen(true);
+    void (async () => {
+      try {
+        const supabase = createSupabaseClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+        const { data: perfil } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+        if (!perfil?.franquicia_id) return;
+        const { conceptos, formasPago } = await loadCajaCatalogForFranquicia(
+          supabase,
+          perfil.franquicia_id,
+        );
+        setConceptosCatalog(conceptos);
+        setFormasPagoList(formasPago);
+        setDraft(emptyDraftFrom(conceptos, formasPago));
+      } catch {
+        setConceptosCatalog(EMPTY_CONCEPTOS);
+        setFormasPagoList([]);
+        setDraft(emptyDraftFrom(EMPTY_CONCEPTOS, []));
+      }
+    })();
   }, []);
 
-  const openEdit = useCallback(
-    (m: Movimiento) => {
-      const { conceptos, formasPago } = loadCajaCatalogFromStorage();
-      setConceptosCatalog(conceptos);
-      setFormasPagoList(formasPago);
-      setConsolidadoOpen(false);
-      setSheetMode("edit");
-      setEditingId(m.id);
-      let d = movimientoToDraft(m);
-      if (
-        !isValidConceptoDescripcionFrom(
-          m.categoria,
-          m.concepto,
-          m.descripcion,
-          conceptos,
-        )
-      ) {
-        const fb = firstConceptoDescFrom(m.categoria, conceptos);
-        d = { ...d, concepto: fb.concepto, descripcion: fb.descripcion };
+  const openEdit = useCallback((m: Movimiento) => {
+    setConsolidadoOpen(false);
+    setSheetMode("edit");
+    setEditingId(m.id);
+    setIsEditingMovimiento(false);
+    setSheetOpen(true);
+    void (async () => {
+      try {
+        const supabase = createSupabaseClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+        const { data: perfil } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+        if (!perfil?.franquicia_id) return;
+        const { conceptos, formasPago } = await loadCajaCatalogForFranquicia(
+          supabase,
+          perfil.franquicia_id,
+        );
+        setConceptosCatalog(conceptos);
+        setFormasPagoList(formasPago);
+        let d = movimientoToDraft(m);
+        if (
+          !isValidConceptoDescripcionFrom(
+            m.categoria,
+            m.concepto,
+            m.descripcion,
+            conceptos,
+          )
+        ) {
+          const fb = firstConceptoDescFrom(m.categoria, conceptos);
+          d = { ...d, concepto: fb.concepto, descripcion: fb.descripcion };
+        }
+        if (
+          formasPago.length > 0 &&
+          (!d.formaPago || !formasPago.includes(d.formaPago))
+        ) {
+          d = { ...d, formaPago: formasPago[0] ?? "" };
+        }
+        setDraft(d);
+      } catch {
+        setConceptosCatalog(EMPTY_CONCEPTOS);
+        setFormasPagoList([]);
+        setDraft(movimientoToDraft(m));
       }
-      if (
-        formasPago.length > 0 &&
-        (!d.formaPago || !formasPago.includes(d.formaPago))
-      ) {
-        d = { ...d, formaPago: formasPago[0] ?? "" };
-      }
-      setDraft(d);
-      setIsEditingMovimiento(false);
-      setSheetOpen(true);
-    },
-    [],
-  );
+    })();
+  }, []);
 
   const saveDraft = useCallback(() => {
     const montoNum = Math.abs(Number(draft.monto) || 0);

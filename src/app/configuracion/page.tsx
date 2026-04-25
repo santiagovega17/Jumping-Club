@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import {
   Accordion,
   AccordionContent,
@@ -34,6 +34,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { PremiumCardTitle } from "@/components/PremiumTitle";
 import { SectionHeading } from "@/components/SectionHeading";
 import {
@@ -43,6 +50,7 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
+import type { ConceptoCaja, FormaPago, PlantillaClase } from "@/types/database.types";
 
 const LABEL_TECH =
   "text-sm font-medium text-zinc-400 uppercase tracking-wider";
@@ -89,24 +97,9 @@ type Instructor = {
   especialidad: string;
 };
 
-type ClaseTemplate = {
-  id: string;
-  nombre: string;
-  instructorId: string;
-  horario: string;
-};
-
-type ConceptosBranch = Record<string, string[]>;
-
+/** Preferencias locales (horarios, cupos). El resto vive en Supabase por franquicia. */
 type ClubConfig = {
   pases: Pase[];
-  formasPago: string[];
-  conceptosCaja: {
-    ingresos: ConceptosBranch;
-    egresos: ConceptosBranch;
-  };
-  instructores: Instructor[];
-  clasesTemplate: ClaseTemplate[];
   schedules: Record<DayId, DaySchedule>;
   cantidadClasesDia: string;
   horariosFijos: string[];
@@ -134,17 +127,8 @@ const defaultSchedules: Record<DayId, DaySchedule> = {
   },
 };
 
-const defaultConceptos: ClubConfig["conceptosCaja"] = {
-  ingresos: {},
-  egresos: {},
-};
-
 const defaultConfig: ClubConfig = {
   pases: [],
-  formasPago: [],
-  conceptosCaja: defaultConceptos,
-  instructores: [],
-  clasesTemplate: [],
   schedules: defaultSchedules,
   cantidadClasesDia: "3",
   horariosFijos: [],
@@ -160,24 +144,6 @@ function formatPesos(value: number) {
   const abs = Math.abs(value);
   const formatted = abs.toLocaleString("es-AR", { maximumFractionDigits: 0 });
   return `$${formatted}`;
-}
-
-function sanitizeConceptBranch(
-  raw: unknown,
-  fallback: ConceptosBranch,
-): ConceptosBranch {
-  if (!raw || typeof raw !== "object") return { ...fallback };
-  const out: ConceptosBranch = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof k !== "string" || !k.trim()) continue;
-    if (!Array.isArray(v)) out[k] = [];
-    else {
-      out[k] = v.filter(
-        (x): x is string => typeof x === "string" && Boolean(x.trim()),
-      );
-    }
-  }
-  return out;
 }
 
 function sanitizePases(raw: unknown): Pase[] {
@@ -200,45 +166,6 @@ function sanitizePases(raw: unknown): Pase[] {
   return list;
 }
 
-function sanitizeInstructores(raw: unknown): Instructor[] {
-  if (!Array.isArray(raw)) return defaultConfig.instructores;
-  return raw
-    .map((x) => {
-      if (!x || typeof x !== "object") return null;
-      const o = x as Record<string, unknown>;
-      const nombre = typeof o.nombre === "string" ? o.nombre.trim() : "";
-      if (!nombre) return null;
-      return {
-        id: typeof o.id === "string" ? o.id : newId("inst"),
-        nombre,
-        especialidad:
-          typeof o.especialidad === "string" ? o.especialidad.trim() : "",
-      };
-    })
-    .filter((x): x is Instructor => x != null);
-}
-
-function sanitizeClasesTemplate(raw: unknown): ClaseTemplate[] {
-  if (!Array.isArray(raw)) return defaultConfig.clasesTemplate;
-  return raw
-    .map((x) => {
-      if (!x || typeof x !== "object") return null;
-      const o = x as Record<string, unknown>;
-      const nombre = typeof o.nombre === "string" ? o.nombre.trim() : "";
-      const instructorId =
-        typeof o.instructorId === "string" ? o.instructorId.trim() : "";
-      const horario = typeof o.horario === "string" ? o.horario.trim() : "";
-      if (!nombre || !instructorId || !horario) return null;
-      return {
-        id: typeof o.id === "string" ? o.id : newId("tpl"),
-        nombre,
-        instructorId,
-        horario,
-      };
-    })
-    .filter((x): x is ClaseTemplate => x != null);
-}
-
 function mergeSchedules(
   patch?: Partial<Record<DayId, DaySchedule>> | null,
 ): Record<DayId, DaySchedule> {
@@ -255,31 +182,20 @@ function mergeSchedules(
   return out;
 }
 
-function parseStored(raw: string | null): ClubConfig | null {
+type PersistedClubSlice = Pick<
+  ClubConfig,
+  | "schedules"
+  | "cantidadClasesDia"
+  | "horariosFijos"
+  | "cupoMaximo"
+  | "aplicarCupoNuevas"
+>;
+
+function parseStored(raw: string | null): Partial<ClubConfig> | null {
   if (!raw) return null;
   try {
-    const p = JSON.parse(raw) as Partial<ClubConfig>;
-    const conceptosCaja =
-      p.conceptosCaja == null
-        ? defaultConceptos
-        : {
-            ingresos: sanitizeConceptBranch(
-              p.conceptosCaja.ingresos,
-              defaultConceptos.ingresos,
-            ),
-            egresos: sanitizeConceptBranch(
-              p.conceptosCaja.egresos,
-              defaultConceptos.egresos,
-            ),
-          };
+    const p = JSON.parse(raw) as Partial<ClubConfig> & Partial<PersistedClubSlice>;
     return {
-      pases: sanitizePases(p.pases),
-      instructores: sanitizeInstructores(p.instructores),
-      clasesTemplate: sanitizeClasesTemplate(p.clasesTemplate),
-      formasPago: Array.isArray(p.formasPago)
-        ? p.formasPago.filter((x) => typeof x === "string" && x.trim())
-        : defaultConfig.formasPago,
-      conceptosCaja,
       schedules: mergeSchedules(p.schedules ?? null),
       cantidadClasesDia:
         typeof p.cantidadClasesDia === "string"
@@ -301,6 +217,16 @@ function parseStored(raw: string | null): ClubConfig | null {
   } catch {
     return null;
   }
+}
+
+function persistableSlice(c: ClubConfig): PersistedClubSlice {
+  return {
+    schedules: c.schedules,
+    cantidadClasesDia: c.cantidadClasesDia,
+    horariosFijos: c.horariosFijos,
+    cupoMaximo: c.cupoMaximo,
+    aplicarCupoNuevas: c.aplicarCupoNuevas,
+  };
 }
 
 export default function ConfiguracionPage() {
@@ -325,23 +251,106 @@ export default function ConfiguracionPage() {
   const [nuevaClaseHorario, setNuevaClaseHorario] = useState("09:00");
   const [adminFranquiciaId, setAdminFranquiciaId] = useState<string | null>(null);
 
+  const [formasPagoRows, setFormasPagoRows] = useState<FormaPago[]>([]);
+  const [conceptosCajaRows, setConceptosCajaRows] = useState<ConceptoCaja[]>([]);
+  const [plantillasRows, setPlantillasRows] = useState<PlantillaClase[]>([]);
+  const [instructoresRows, setInstructoresRows] = useState<Instructor[]>([]);
+  const [instructorDialogOpen, setInstructorDialogOpen] = useState(false);
+  const [instructorEditId, setInstructorEditId] = useState<string | null>(null);
+  const [instructorEditNombre, setInstructorEditNombre] = useState("");
+  const [instructorEditEspecialidad, setInstructorEditEspecialidad] =
+    useState("");
+
+  const refreshFranquiciaData = useCallback(async (franquiciaId: string) => {
+    const supabase = createSupabaseClient();
+    const [planesRes, instRes, fpRes, ccRes, plRes] = await Promise.all([
+      supabase
+        .from("planes")
+        .select("id,nombre,precio,version")
+        .eq("franquicia_id", franquiciaId)
+        .eq("estado", "activo")
+        .order("nombre", { ascending: true }),
+      supabase
+        .from("instructores")
+        .select("id,nombre,estado,especialidad")
+        .eq("franquicia_id", franquiciaId)
+        .order("nombre", { ascending: true }),
+      supabase
+        .from("formas_pago")
+        .select("*")
+        .eq("franquicia_id", franquiciaId)
+        .eq("activo", true)
+        .order("orden", { ascending: true })
+        .order("nombre", { ascending: true }),
+      supabase
+        .from("conceptos_caja")
+        .select("*")
+        .eq("franquicia_id", franquiciaId)
+        .order("orden", { ascending: true })
+        .order("concepto", { ascending: true })
+        .order("descripcion", { ascending: true }),
+      supabase
+        .from("plantillas_clases")
+        .select("*")
+        .eq("franquicia_id", franquiciaId)
+        .eq("activo", true)
+        .order("orden", { ascending: true })
+        .order("horario", { ascending: true }),
+    ]);
+
+    if (!planesRes.error && planesRes.data) {
+      setConfig((c) => ({
+        ...c,
+        pases: planesRes.data.map((p) => ({
+          id: p.id,
+          nombre: p.version ? `${p.nombre} (${p.version})` : p.nombre,
+          precio: Math.round(Number(p.precio) || 0),
+        })),
+      }));
+    }
+
+    if (!instRes.error && instRes.data) {
+      setInstructoresRows(
+        instRes.data.map((inst) => ({
+          id: inst.id,
+          nombre: inst.nombre,
+          especialidad: inst.especialidad?.trim() ?? "",
+        })),
+      );
+    } else {
+      setInstructoresRows([]);
+    }
+
+    if (!fpRes.error && fpRes.data) setFormasPagoRows(fpRes.data);
+    else setFormasPagoRows([]);
+
+    if (!ccRes.error && ccRes.data) setConceptosCajaRows(ccRes.data);
+    else setConceptosCajaRows([]);
+
+    if (!plRes.error && plRes.data) setPlantillasRows(plRes.data);
+    else setPlantillasRows([]);
+  }, []);
+
   useEffect(() => {
     const loaded = parseStored(
       typeof window !== "undefined"
         ? window.localStorage.getItem(STORAGE_KEY)
         : null,
     );
-    if (loaded) setConfig(loaded);
+    if (loaded) setConfig((c) => ({ ...defaultConfig, ...loaded }));
     setHydrated(true);
   }, []);
 
   useEffect(() => {
     if (!hydrated || typeof window === "undefined") return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(persistableSlice(config)),
+    );
   }, [config, hydrated]);
 
   useEffect(() => {
-    const loadPlanesForAdminFranquicia = async () => {
+    const load = async () => {
       try {
         const supabase = createSupabaseClient();
         const {
@@ -357,47 +366,14 @@ export default function ConfiguracionPage() {
 
         if (perfilError || !perfil?.franquicia_id) return;
         setAdminFranquiciaId(perfil.franquicia_id);
-
-        const { data: planes, error: planesError } = await supabase
-          .from("planes")
-          .select("id,nombre,precio,version")
-          .eq("franquicia_id", perfil.franquicia_id)
-          .eq("estado", "activo")
-          .order("nombre", { ascending: true });
-
-        if (!planesError && planes) {
-          setConfig((c) => ({
-            ...c,
-            pases: planes.map((p) => ({
-              id: p.id,
-              nombre: p.version ? `${p.nombre} (${p.version})` : p.nombre,
-              precio: Math.round(Number(p.precio) || 0),
-            })),
-          }));
-        }
-
-        const { data: instructores, error: instructoresError } = await supabase
-          .from("instructores")
-          .select("id,nombre,estado")
-          .eq("franquicia_id", perfil.franquicia_id);
-
-        if (!instructoresError && instructores) {
-          setConfig((c) => ({
-            ...c,
-            instructores: instructores.map((inst) => ({
-              id: inst.id,
-              nombre: inst.nombre,
-              especialidad: "",
-            })),
-          }));
-        }
+        await refreshFranquiciaData(perfil.franquicia_id);
       } catch {
-        // fallback local-only
+        /* ignore */
       }
     };
 
-    loadPlanesForAdminFranquicia();
-  }, []);
+    void load();
+  }, [refreshFranquiciaData]);
 
   const updateBlock = useCallback(
     (block: "manana" | "tarde", patch: Partial<BlockSchedule>) => {
@@ -417,19 +393,32 @@ export default function ConfiguracionPage() {
 
   const day = config.schedules[selectedDay];
 
-  const ingresosKeys = useMemo(
-    () => Object.keys(config.conceptosCaja.ingresos).sort(),
-    [config.conceptosCaja.ingresos],
-  );
-  const egresosKeys = useMemo(
-    () => Object.keys(config.conceptosCaja.egresos).sort(),
-    [config.conceptosCaja.egresos],
-  );
+  const ingresosGrouped = useMemo(() => {
+    const map = new Map<string, ConceptoCaja[]>();
+    for (const r of conceptosCajaRows) {
+      if (r.tipo !== "ingreso") continue;
+      if (!map.has(r.concepto)) map.set(r.concepto, []);
+      map.get(r.concepto)!.push(r);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [conceptosCajaRows]);
+
+  const egresosGrouped = useMemo(() => {
+    const map = new Map<string, ConceptoCaja[]>();
+    for (const r of conceptosCajaRows) {
+      if (r.tipo !== "egreso") continue;
+      if (!map.has(r.concepto)) map.set(r.concepto, []);
+      map.get(r.concepto)!.push(r);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [conceptosCajaRows]);
 
   const instructorNombreById = useMemo(
     () =>
-      Object.fromEntries(config.instructores.map((inst) => [inst.id, inst.nombre])),
-    [config.instructores],
+      Object.fromEntries(
+        instructoresRows.map((inst) => [inst.id, inst.nombre]),
+      ),
+    [instructoresRows],
   );
 
   const addPase = async () => {
@@ -481,148 +470,306 @@ export default function ConfiguracionPage() {
     }
   };
 
-  const removePase = (id: string) => {
-    setConfig((c) => ({ ...c, pases: c.pases.filter((p) => p.id !== id) }));
-    toast.success("Pase eliminado correctamente");
+  const removePase = async (id: string) => {
+    if (!adminFranquiciaId) return;
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase
+        .from("planes")
+        .update({ estado: "inactivo" })
+        .eq("id", id)
+        .eq("franquicia_id", adminFranquiciaId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Pase eliminado correctamente");
+    } catch {
+      toast.error("No se pudo eliminar el plan");
+    }
   };
 
-  const addForma = () => {
+  const addForma = async () => {
     const t = nuevaForma.trim();
-    if (!t || config.formasPago.some((x) => x.toLowerCase() === t.toLowerCase()))
+    if (!t || !adminFranquiciaId) return;
+    if (
+      formasPagoRows.some((x) => x.nombre.toLowerCase() === t.toLowerCase())
+    ) {
       return;
-    setConfig((c) => ({ ...c, formasPago: [...c.formasPago, t] }));
-    setNuevaForma("");
-    toast.success("Forma de pago agregada correctamente");
+    }
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase.from("formas_pago").insert({
+        franquicia_id: adminFranquiciaId,
+        nombre: t,
+        orden: formasPagoRows.length,
+        activo: true,
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setNuevaForma("");
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Forma de pago agregada correctamente");
+    } catch {
+      toast.error("No se pudo agregar la forma de pago");
+    }
   };
 
-  const removeForma = (forma: string) => {
-    setConfig((c) => ({
-      ...c,
-      formasPago: c.formasPago.filter((x) => x !== forma),
-    }));
-    toast.success("Forma de pago eliminada correctamente");
+  const removeForma = async (id: string) => {
+    if (!adminFranquiciaId) return;
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase.from("formas_pago").delete().eq("id", id);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Forma de pago eliminada correctamente");
+    } catch {
+      toast.error("No se pudo eliminar");
+    }
   };
 
-  const addConcepto = (rama: "ingresos" | "egresos", nombre: string) => {
+  const addConcepto = async (rama: "ingresos" | "egresos", nombre: string) => {
     const t = nombre.trim();
-    if (!t || config.conceptosCaja[rama][t]) return;
-    setConfig((c) => ({
-      ...c,
-      conceptosCaja: {
-        ...c.conceptosCaja,
-        [rama]: { ...c.conceptosCaja[rama], [t]: [] },
-      },
-    }));
-    if (rama === "ingresos") setNuevoConceptoIng("");
-    else setNuevoConceptoEgr("");
-    toast.success("Concepto agregado correctamente");
+    const tipo = rama === "ingresos" ? "ingreso" : "egreso";
+    if (!t || !adminFranquiciaId) return;
+    if (conceptosCajaRows.some((r) => r.tipo === tipo && r.concepto === t)) {
+      return;
+    }
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase.from("conceptos_caja").insert({
+        franquicia_id: adminFranquiciaId,
+        tipo,
+        concepto: t,
+        descripcion: "General",
+        orden: 0,
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      if (rama === "ingresos") setNuevoConceptoIng("");
+      else setNuevoConceptoEgr("");
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Concepto agregado correctamente");
+    } catch {
+      toast.error("No se pudo agregar el concepto");
+    }
   };
 
-  const removeConcepto = (rama: "ingresos" | "egresos", concepto: string) => {
-    setConfig((c) => {
-      const next = { ...c.conceptosCaja[rama] };
-      delete next[concepto];
-      return {
-        ...c,
-        conceptosCaja: { ...c.conceptosCaja, [rama]: next },
-      };
-    });
-    toast.success("Concepto eliminado correctamente");
+  const removeConcepto = async (
+    rama: "ingresos" | "egresos",
+    concepto: string,
+  ) => {
+    if (!adminFranquiciaId) return;
+    const tipo = rama === "ingresos" ? "ingreso" : "egreso";
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase
+        .from("conceptos_caja")
+        .delete()
+        .eq("franquicia_id", adminFranquiciaId)
+        .eq("tipo", tipo)
+        .eq("concepto", concepto);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Concepto eliminado correctamente");
+    } catch {
+      toast.error("No se pudo eliminar el concepto");
+    }
   };
 
-  const addDescripcion = (
+  const addDescripcion = async (
     rama: "ingresos" | "egresos",
     concepto: string,
     draftKey: string,
   ) => {
     const text = (descDrafts[draftKey] ?? "").trim();
-    if (!text) return;
-    setConfig((c) => {
-      const branch = { ...c.conceptosCaja[rama] };
-      const list = [...(branch[concepto] ?? [])];
-      if (list.some((x) => x.toLowerCase() === text.toLowerCase())) return c;
-      list.push(text);
-      branch[concepto] = list;
-      return {
-        ...c,
-        conceptosCaja: { ...c.conceptosCaja, [rama]: branch },
-      };
-    });
-    setDescDrafts((d) => ({ ...d, [draftKey]: "" }));
-    toast.success("Descripción agregada correctamente");
+    const tipo = rama === "ingresos" ? "ingreso" : "egreso";
+    if (!text || !adminFranquiciaId) return;
+    if (
+      conceptosCajaRows.some(
+        (r) =>
+          r.tipo === tipo &&
+          r.concepto === concepto &&
+          r.descripcion.toLowerCase() === text.toLowerCase(),
+      )
+    ) {
+      return;
+    }
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase.from("conceptos_caja").insert({
+        franquicia_id: adminFranquiciaId,
+        tipo,
+        concepto,
+        descripcion: text,
+        orden: 0,
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setDescDrafts((d) => ({ ...d, [draftKey]: "" }));
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Descripción agregada correctamente");
+    } catch {
+      toast.error("No se pudo agregar la descripción");
+    }
   };
 
-  const removeDescripcion = (
-    rama: "ingresos" | "egresos",
-    concepto: string,
-    desc: string,
-  ) => {
-    setConfig((c) => {
-      const branch = { ...c.conceptosCaja[rama] };
-      branch[concepto] = (branch[concepto] ?? []).filter((x) => x !== desc);
-      return {
-        ...c,
-        conceptosCaja: { ...c.conceptosCaja, [rama]: branch },
-      };
-    });
-    toast.success("Descripción eliminada correctamente");
+  const removeDescripcionRow = async (id: string) => {
+    if (!adminFranquiciaId) return;
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase
+        .from("conceptos_caja")
+        .delete()
+        .eq("id", id);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Descripción eliminada correctamente");
+    } catch {
+      toast.error("No se pudo eliminar");
+    }
   };
 
-  const addInstructor = () => {
+  const addInstructor = async () => {
     const nombre = nuevoInstructorNombre.trim();
+    if (!nombre || !adminFranquiciaId) return;
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase.from("instructores").insert({
+        franquicia_id: adminFranquiciaId,
+        nombre,
+        estado: "activo",
+        especialidad: nuevoInstructorEspecialidad.trim() || null,
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setNuevoInstructorNombre("");
+      setNuevoInstructorEspecialidad("");
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Instructor agregado correctamente");
+    } catch {
+      toast.error("No se pudo agregar el instructor");
+    }
+  };
+
+  const removeInstructor = async (id: string) => {
+    if (!adminFranquiciaId) return;
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase.from("instructores").delete().eq("id", id);
+      if (error) {
+        toast.error(
+          error.message.includes("foreign key")
+            ? "No se puede eliminar: hay plantillas u otras referencias."
+            : error.message,
+        );
+        return;
+      }
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Instructor eliminado correctamente");
+    } catch {
+      toast.error("No se pudo eliminar el instructor");
+    }
+  };
+
+  const openEditInstructor = (inst: Instructor) => {
+    setInstructorEditId(inst.id);
+    setInstructorEditNombre(inst.nombre);
+    setInstructorEditEspecialidad(inst.especialidad ?? "");
+    setInstructorDialogOpen(true);
+  };
+
+  const saveInstructorEdit = async () => {
+    if (!instructorEditId || !adminFranquiciaId) return;
+    const nombre = instructorEditNombre.trim();
     if (!nombre) return;
-    setConfig((c) => ({
-      ...c,
-      instructores: [
-        ...c.instructores,
-        {
-          id: newId("inst"),
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase
+        .from("instructores")
+        .update({
           nombre,
-          especialidad: nuevoInstructorEspecialidad.trim(),
-        },
-      ],
-    }));
-    setNuevoInstructorNombre("");
-    setNuevoInstructorEspecialidad("");
-    toast.success("Instructor agregado correctamente");
+          especialidad: instructorEditEspecialidad.trim() || null,
+        })
+        .eq("id", instructorEditId)
+        .eq("franquicia_id", adminFranquiciaId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setInstructorDialogOpen(false);
+      setInstructorEditId(null);
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Instructor actualizado");
+    } catch {
+      toast.error("No se pudo guardar");
+    }
   };
 
-  const removeInstructor = (id: string) => {
-    setConfig((c) => ({
-      ...c,
-      instructores: c.instructores.filter((inst) => inst.id !== id),
-      clasesTemplate: c.clasesTemplate.filter((tpl) => tpl.instructorId !== id),
-    }));
-    toast.success("Instructor eliminado correctamente");
-  };
-
-  const addClaseTemplate = () => {
+  const addClaseTemplate = async () => {
     const nombre = nuevaClaseNombre.trim();
-    if (!nombre || !nuevaClaseInstructorId || !nuevaClaseHorario) return;
-    setConfig((c) => ({
-      ...c,
-      clasesTemplate: [
-        ...c.clasesTemplate,
-        {
-          id: newId("tpl"),
-          nombre,
-          instructorId: nuevaClaseInstructorId,
-          horario: nuevaClaseHorario,
-        },
-      ],
-    }));
-    setNuevaClaseNombre("");
-    setNuevaClaseInstructorId("");
-    setNuevaClaseHorario("09:00");
-    toast.success("Clase global guardada correctamente");
+    const horarioRaw = nuevaClaseHorario.trim().slice(0, 5);
+    if (!nombre || !nuevaClaseInstructorId || !horarioRaw || !adminFranquiciaId)
+      return;
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase.from("plantillas_clases").insert({
+        franquicia_id: adminFranquiciaId,
+        nombre,
+        instructor_id: nuevaClaseInstructorId,
+        horario: horarioRaw,
+        orden: plantillasRows.length,
+        activo: true,
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setNuevaClaseNombre("");
+      setNuevaClaseInstructorId("");
+      setNuevaClaseHorario("09:00");
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Plantilla guardada correctamente");
+    } catch {
+      toast.error("No se pudo guardar la plantilla");
+    }
   };
 
-  const removeClaseTemplate = (id: string) => {
-    setConfig((c) => ({
-      ...c,
-      clasesTemplate: c.clasesTemplate.filter((tpl) => tpl.id !== id),
-    }));
-    toast.success("Clase global eliminada correctamente");
+  const removeClaseTemplate = async (id: string) => {
+    if (!adminFranquiciaId) return;
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase
+        .from("plantillas_clases")
+        .delete()
+        .eq("id", id);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Plantilla eliminada correctamente");
+    } catch {
+      toast.error("No se pudo eliminar");
+    }
   };
 
   const cardClass =
@@ -633,8 +780,9 @@ export default function ConfiguracionPage() {
       <div className="mb-8">
         <h1 className={PAGE_TITLE_CLASS}>Configuración</h1>
         <p className={cn(PAGE_SUBTITLE_CLASS, "max-w-2xl")}>
-          Pases, medios de pago, conceptos de caja y horarios del club. Los
-          cambios se guardan automáticamente en este navegador.
+          Pases, formas de pago, conceptos de caja, instructores y plantillas se
+          guardan en la base por franquicia. Los horarios semanales siguen en
+          este navegador.
         </p>
       </div>
 
@@ -718,7 +866,7 @@ export default function ConfiguracionPage() {
                   <Button
                     type="button"
                     className={cn("w-full shrink-0 sm:w-auto", BTN_FUCSIA)}
-                    onClick={addPase}
+                    onClick={() => void addPase()}
                   >
                     <Plus className="size-4" aria-hidden />
                     Agregar pase
@@ -768,7 +916,7 @@ export default function ConfiguracionPage() {
                               variant="ghost"
                               size="icon"
                               className="text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
-                              onClick={() => removePase(p.id)}
+                              onClick={() => void removePase(p.id)}
                               aria-label={`Eliminar ${p.nombre}`}
                             >
                               <Trash2 className="size-4" />
@@ -812,7 +960,7 @@ export default function ConfiguracionPage() {
                   <Button
                     type="button"
                     className={cn("w-full sm:w-auto", BTN_VERDE)}
-                    onClick={addForma}
+                    onClick={() => void addForma()}
                   >
                     <Plus className="size-4" aria-hidden />
                     Agregar método
@@ -823,22 +971,20 @@ export default function ConfiguracionPage() {
               <div>
                 <p className={cn(LABEL_TECH, "mb-3")}>Métodos configurados</p>
                 <div className="flex flex-wrap gap-2">
-                  {config.formasPago.length === 0 ? (
-                    <p className="text-sm text-zinc-500">
-                      No hay métodos. Agregá uno arriba.
-                    </p>
+                  {formasPagoRows.length === 0 ? (
+                    <p className="text-sm text-zinc-500">Sin registros.</p>
                   ) : (
-                    config.formasPago.map((forma) => (
+                    formasPagoRows.map((fp) => (
                       <span
-                        key={forma}
+                        key={fp.id}
                         className="inline-flex items-center gap-1.5 rounded-full border border-zinc-800/80 bg-zinc-950/80 px-3 py-1.5 text-sm text-zinc-200"
                       >
-                        {forma}
+                        {fp.nombre}
                         <button
                           type="button"
                           className="rounded p-0.5 text-[#e41b68]/80 transition-colors hover:bg-[#e41b68]/15 hover:text-[#e41b68]"
-                          onClick={() => removeForma(forma)}
-                          aria-label={`Quitar ${forma}`}
+                          onClick={() => void removeForma(fp.id)}
+                          aria-label={`Quitar ${fp.nombre}`}
                         >
                           <Trash2 className="size-3.5" />
                         </button>
@@ -856,8 +1002,8 @@ export default function ConfiguracionPage() {
             <CardHeader>
               <PremiumCardTitle>Conceptos de caja</PremiumCardTitle>
               <CardDescription className="text-sm text-zinc-500">
-                Catálogo de ingresos y egresos por concepto y descripción. Se
-                usa como referencia para cargar movimientos.
+                Catálogo guardado en la base de datos por franquicia. Se usa en
+                caja para validar movimientos.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -881,104 +1027,102 @@ export default function ConfiguracionPage() {
                       type="button"
                       className={cn("w-full shrink-0 sm:w-auto", BTN_VERDE)}
                       onClick={() =>
-                        addConcepto("ingresos", nuevoConceptoIng)
+                        void addConcepto("ingresos", nuevoConceptoIng)
                       }
                     >
                       <Plus className="size-4" aria-hidden />
                       Nuevo concepto
                     </Button>
                   </div>
-                  <Accordion
-                    type="multiple"
-                    className="rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
-                  >
-                    {ingresosKeys.map((concepto) => (
-                      <AccordionItem
-                        key={concepto}
-                        value={concepto}
-                        className="border-zinc-800/50"
-                      >
-                        <div className="flex items-stretch gap-1">
-                          <AccordionTrigger className="flex-1 py-3 hover:no-underline">
-                            <span className="text-left text-sm font-semibold text-zinc-100">
-                              {concepto}
-                            </span>
-                          </AccordionTrigger>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="mt-2 shrink-0 self-start text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeConcepto("ingresos", concepto);
-                            }}
-                            aria-label={`Eliminar concepto ${concepto}`}
-                          >
-                            <Trash2 className="size-4" />
-                          </Button>
-                        </div>
-                        <AccordionContent>
-                          <div className="flex flex-wrap gap-2 pb-2">
-                            {(config.conceptosCaja.ingresos[concepto] ?? []).map(
-                              (d) => (
+                  {ingresosGrouped.length === 0 ? (
+                    <p className="text-sm text-zinc-500">Sin registros.</p>
+                  ) : (
+                    <Accordion
+                      type="multiple"
+                      className="rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
+                    >
+                      {ingresosGrouped.map(([concepto, rows]) => (
+                        <AccordionItem
+                          key={concepto}
+                          value={concepto}
+                          className="border-zinc-800/50"
+                        >
+                          <div className="flex items-stretch gap-1">
+                            <AccordionTrigger className="flex-1 py-3 hover:no-underline">
+                              <span className="text-left text-sm font-semibold text-zinc-100">
+                                {concepto}
+                              </span>
+                            </AccordionTrigger>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="mt-2 shrink-0 self-start text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void removeConcepto("ingresos", concepto);
+                              }}
+                              aria-label={`Eliminar concepto ${concepto}`}
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
+                          </div>
+                          <AccordionContent>
+                            <div className="flex flex-wrap gap-2 pb-2">
+                              {rows.map((row) => (
                                 <span
-                                  key={d}
+                                  key={row.id}
                                   className="inline-flex items-center gap-1 rounded-md border border-zinc-800/80 bg-zinc-900/60 px-2 py-1 text-xs text-zinc-200"
                                 >
-                                  {d}
+                                  {row.descripcion}
                                   <button
                                     type="button"
                                     className="rounded p-0.5 text-zinc-500 hover:text-[#e41b68]"
                                     onClick={() =>
-                                      removeDescripcion(
-                                        "ingresos",
-                                        concepto,
-                                        d,
-                                      )
+                                      void removeDescripcionRow(row.id)
                                     }
-                                    aria-label={`Quitar ${d}`}
+                                    aria-label={`Quitar ${row.descripcion}`}
                                   >
                                     <Trash2 className="size-3" />
                                   </button>
                                 </span>
-                              ),
-                            )}
-                          </div>
-                          <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3 sm:flex-row">
-                            <Input
-                              value={
-                                descDrafts[`ing-${concepto}`] ?? ""
-                              }
-                              onChange={(e) =>
-                                setDescDrafts((prev) => ({
-                                  ...prev,
-                                  [`ing-${concepto}`]: e.target.value,
-                                }))
-                              }
-                              placeholder="Nueva descripción"
-                              className="border-zinc-800 bg-zinc-950 text-sm text-zinc-100 sm:flex-1"
-                            />
-                            <Button
-                              type="button"
-                              size="sm"
-                              className={cn("w-full sm:w-auto", BTN_VERDE)}
-                              onClick={() =>
-                                addDescripcion(
-                                  "ingresos",
-                                  concepto,
-                                  `ing-${concepto}`,
-                                )
-                              }
-                            >
-                              <Plus className="size-4" aria-hidden />
-                              Nueva descripción
-                            </Button>
-                          </div>
-                        </AccordionContent>
-                      </AccordionItem>
-                    ))}
-                  </Accordion>
+                              ))}
+                            </div>
+                            <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3 sm:flex-row">
+                              <Input
+                                value={
+                                  descDrafts[`ing-${concepto}`] ?? ""
+                                }
+                                onChange={(e) =>
+                                  setDescDrafts((prev) => ({
+                                    ...prev,
+                                    [`ing-${concepto}`]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Nueva descripción"
+                                className="border-zinc-800 bg-zinc-950 text-sm text-zinc-100 sm:flex-1"
+                              />
+                              <Button
+                                type="button"
+                                size="sm"
+                                className={cn("w-full sm:w-auto", BTN_VERDE)}
+                                onClick={() =>
+                                  void addDescripcion(
+                                    "ingresos",
+                                    concepto,
+                                    `ing-${concepto}`,
+                                  )
+                                }
+                              >
+                                <Plus className="size-4" aria-hidden />
+                                Nueva descripción
+                              </Button>
+                            </div>
+                          </AccordionContent>
+                        </AccordionItem>
+                      ))}
+                    </Accordion>
+                  )}
                 </section>
 
                 <section className="min-w-0 space-y-4">
@@ -1000,104 +1144,102 @@ export default function ConfiguracionPage() {
                       type="button"
                       className={cn("w-full shrink-0 sm:w-auto", BTN_FUCSIA)}
                       onClick={() =>
-                        addConcepto("egresos", nuevoConceptoEgr)
+                        void addConcepto("egresos", nuevoConceptoEgr)
                       }
                     >
                       <Plus className="size-4" aria-hidden />
                       Nuevo concepto
                     </Button>
                   </div>
-                  <Accordion
-                    type="multiple"
-                    className="rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
-                  >
-                    {egresosKeys.map((concepto) => (
-                      <AccordionItem
-                        key={concepto}
-                        value={concepto}
-                        className="border-zinc-800/50"
-                      >
-                        <div className="flex items-stretch gap-1">
-                          <AccordionTrigger className="flex-1 py-3 hover:no-underline">
-                            <span className="text-left text-sm font-semibold text-zinc-100">
-                              {concepto}
-                            </span>
-                          </AccordionTrigger>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="mt-2 shrink-0 self-start text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeConcepto("egresos", concepto);
-                            }}
-                            aria-label={`Eliminar concepto ${concepto}`}
-                          >
-                            <Trash2 className="size-4" />
-                          </Button>
-                        </div>
-                        <AccordionContent>
-                          <div className="flex flex-wrap gap-2 pb-2">
-                            {(config.conceptosCaja.egresos[concepto] ?? []).map(
-                              (d) => (
+                  {egresosGrouped.length === 0 ? (
+                    <p className="text-sm text-zinc-500">Sin registros.</p>
+                  ) : (
+                    <Accordion
+                      type="multiple"
+                      className="rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
+                    >
+                      {egresosGrouped.map(([concepto, rows]) => (
+                        <AccordionItem
+                          key={concepto}
+                          value={concepto}
+                          className="border-zinc-800/50"
+                        >
+                          <div className="flex items-stretch gap-1">
+                            <AccordionTrigger className="flex-1 py-3 hover:no-underline">
+                              <span className="text-left text-sm font-semibold text-zinc-100">
+                                {concepto}
+                              </span>
+                            </AccordionTrigger>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="mt-2 shrink-0 self-start text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void removeConcepto("egresos", concepto);
+                              }}
+                              aria-label={`Eliminar concepto ${concepto}`}
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
+                          </div>
+                          <AccordionContent>
+                            <div className="flex flex-wrap gap-2 pb-2">
+                              {rows.map((row) => (
                                 <span
-                                  key={d}
+                                  key={row.id}
                                   className="inline-flex items-center gap-1 rounded-md border border-zinc-800/80 bg-zinc-900/60 px-2 py-1 text-xs text-zinc-200"
                                 >
-                                  {d}
+                                  {row.descripcion}
                                   <button
                                     type="button"
                                     className="rounded p-0.5 text-zinc-500 hover:text-[#e41b68]"
                                     onClick={() =>
-                                      removeDescripcion(
-                                        "egresos",
-                                        concepto,
-                                        d,
-                                      )
+                                      void removeDescripcionRow(row.id)
                                     }
-                                    aria-label={`Quitar ${d}`}
+                                    aria-label={`Quitar ${row.descripcion}`}
                                   >
                                     <Trash2 className="size-3" />
                                   </button>
                                 </span>
-                              ),
-                            )}
-                          </div>
-                          <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3 sm:flex-row">
-                            <Input
-                              value={
-                                descDrafts[`egr-${concepto}`] ?? ""
-                              }
-                              onChange={(e) =>
-                                setDescDrafts((prev) => ({
-                                  ...prev,
-                                  [`egr-${concepto}`]: e.target.value,
-                                }))
-                              }
-                              placeholder="Nueva descripción"
-                              className="border-zinc-800 bg-zinc-950 text-sm text-zinc-100 sm:flex-1"
-                            />
-                            <Button
-                              type="button"
-                              size="sm"
-                              className={cn("w-full sm:w-auto", BTN_FUCSIA)}
-                              onClick={() =>
-                                addDescripcion(
-                                  "egresos",
-                                  concepto,
-                                  `egr-${concepto}`,
-                                )
-                              }
-                            >
-                              <Plus className="size-4" aria-hidden />
-                              Nueva descripción
-                            </Button>
-                          </div>
-                        </AccordionContent>
-                      </AccordionItem>
-                    ))}
-                  </Accordion>
+                              ))}
+                            </div>
+                            <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3 sm:flex-row">
+                              <Input
+                                value={
+                                  descDrafts[`egr-${concepto}`] ?? ""
+                                }
+                                onChange={(e) =>
+                                  setDescDrafts((prev) => ({
+                                    ...prev,
+                                    [`egr-${concepto}`]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Nueva descripción"
+                                className="border-zinc-800 bg-zinc-950 text-sm text-zinc-100 sm:flex-1"
+                              />
+                              <Button
+                                type="button"
+                                size="sm"
+                                className={cn("w-full sm:w-auto", BTN_FUCSIA)}
+                                onClick={() =>
+                                  void addDescripcion(
+                                    "egresos",
+                                    concepto,
+                                    `egr-${concepto}`,
+                                  )
+                                }
+                              >
+                                <Plus className="size-4" aria-hidden />
+                                Nueva descripción
+                              </Button>
+                            </div>
+                          </AccordionContent>
+                        </AccordionItem>
+                      ))}
+                    </Accordion>
+                  )}
                 </section>
               </div>
             </CardContent>
@@ -1146,7 +1288,7 @@ export default function ConfiguracionPage() {
                   <Button
                     type="button"
                     className={cn("w-full md:w-auto", BTN_FUCSIA)}
-                    onClick={addInstructor}
+                    onClick={() => void addInstructor()}
                   >
                     <Plus className="size-4" />
                     Agregar instructor
@@ -1160,23 +1302,26 @@ export default function ConfiguracionPage() {
                     <TableRow className="border-zinc-800/50 hover:bg-transparent">
                       <TableHead className={LABEL_TECH}>Nombre</TableHead>
                       <TableHead className={LABEL_TECH}>Especialidad</TableHead>
+                      <TableHead className="w-24 text-right">
+                        <span className="sr-only">Editar</span>
+                      </TableHead>
                       <TableHead className="w-12 text-right">
                         <span className="sr-only">Eliminar</span>
                       </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {config.instructores.length === 0 ? (
+                    {instructoresRows.length === 0 ? (
                       <TableRow className="border-zinc-800/50">
                         <TableCell
-                          colSpan={3}
+                          colSpan={4}
                           className="py-8 text-center text-sm text-zinc-500"
                         >
-                          No hay registros disponibles. Comienza agregando uno nuevo.
+                          Sin registros.
                         </TableCell>
                       </TableRow>
                     ) : (
-                      config.instructores.map((inst) => (
+                      instructoresRows.map((inst) => (
                         <TableRow
                           key={inst.id}
                           className="border-zinc-800/50 hover:bg-zinc-800/30"
@@ -1192,8 +1337,20 @@ export default function ConfiguracionPage() {
                               type="button"
                               variant="ghost"
                               size="icon"
+                              className="text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                              onClick={() => openEditInstructor(inst)}
+                              aria-label={`Editar ${inst.nombre}`}
+                            >
+                              <Pencil className="size-4" />
+                            </Button>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
                               className="text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
-                              onClick={() => removeInstructor(inst.id)}
+                              onClick={() => void removeInstructor(inst.id)}
                               aria-label={`Eliminar ${inst.nombre}`}
                             >
                               <Trash2 className="size-4" />
@@ -1395,7 +1552,7 @@ export default function ConfiguracionPage() {
                         <SelectValue placeholder="Seleccionar instructor" />
                       </SelectTrigger>
                       <SelectContent className="border-zinc-800 bg-zinc-950 text-zinc-100">
-                        {config.instructores.map((inst) => (
+                        {instructoresRows.map((inst) => (
                           <SelectItem key={inst.id} value={inst.id}>
                             {inst.nombre}
                           </SelectItem>
@@ -1419,7 +1576,7 @@ export default function ConfiguracionPage() {
                     <Button
                       type="button"
                       className={cn("w-full md:w-auto", BTN_FUCSIA)}
-                      onClick={addClaseTemplate}
+                      onClick={() => void addClaseTemplate()}
                     >
                       <Plus className="size-4" />
                       Guardar plantilla
@@ -1442,17 +1599,17 @@ export default function ConfiguracionPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {config.clasesTemplate.length === 0 ? (
+                    {plantillasRows.length === 0 ? (
                       <TableRow className="border-zinc-800/50">
                         <TableCell
                           colSpan={4}
                           className="py-8 text-center text-sm text-zinc-500"
                         >
-                          No hay plantillas cargadas.
+                          Sin registros.
                         </TableCell>
                       </TableRow>
                     ) : (
-                      config.clasesTemplate.map((tpl) => (
+                      plantillasRows.map((tpl) => (
                         <TableRow
                           key={tpl.id}
                           className="border-zinc-800/50 hover:bg-zinc-800/30"
@@ -1461,7 +1618,8 @@ export default function ConfiguracionPage() {
                             {tpl.nombre}
                           </TableCell>
                           <TableCell className="text-sm text-zinc-300">
-                            {instructorNombreById[tpl.instructorId] ?? "Sin instructor"}
+                            {instructorNombreById[tpl.instructor_id] ??
+                              "Sin instructor"}
                           </TableCell>
                           <TableCell className="text-sm font-semibold text-zinc-200">
                             {tpl.horario}
@@ -1472,7 +1630,7 @@ export default function ConfiguracionPage() {
                               variant="ghost"
                               size="icon"
                               className="text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
-                              onClick={() => removeClaseTemplate(tpl.id)}
+                              onClick={() => void removeClaseTemplate(tpl.id)}
                               aria-label={`Eliminar ${tpl.nombre}`}
                             >
                               <Trash2 className="size-4" />
@@ -1488,6 +1646,55 @@ export default function ConfiguracionPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={instructorDialogOpen} onOpenChange={setInstructorDialogOpen}>
+        <DialogContent className="border-zinc-800 bg-zinc-950 text-zinc-50 sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Editar instructor</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-inst-nombre" className={LABEL_TECH}>
+                Nombre
+              </Label>
+              <Input
+                id="edit-inst-nombre"
+                value={instructorEditNombre}
+                onChange={(e) => setInstructorEditNombre(e.target.value)}
+                className="border-zinc-800 bg-zinc-900 text-zinc-100"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-inst-esp" className={LABEL_TECH}>
+                Especialidad
+              </Label>
+              <Input
+                id="edit-inst-esp"
+                value={instructorEditEspecialidad}
+                onChange={(e) => setInstructorEditEspecialidad(e.target.value)}
+                className="border-zinc-800 bg-zinc-900 text-zinc-100"
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-zinc-700"
+              onClick={() => setInstructorDialogOpen(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              className={BTN_VERDE}
+              onClick={() => void saveInstructorEdit()}
+            >
+              Guardar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

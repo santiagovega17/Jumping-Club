@@ -38,9 +38,9 @@ import {
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 
 const capacidadTotal = 20;
-const CONFIG_STORAGE_KEY = "jumping-club-config-v1";
 type Role = "administracion" | "socio";
 
 type ClassSheetContext = "new" | "edit";
@@ -143,30 +143,55 @@ export default function CalendarioPage() {
   const selectedDateKey = selectedDate.toISOString().slice(0, 10);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem(CONFIG_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as {
-        instructores?: InstructorConfig[];
-        clasesTemplate?: ClaseTemplateConfig[];
-      };
-      setInstructoresConfig(
-        Array.isArray(parsed.instructores)
-          ? parsed.instructores.filter((x) => x?.id && x?.nombre)
-          : [],
-      );
-      setClasesTemplateConfig(
-        Array.isArray(parsed.clasesTemplate)
-          ? parsed.clasesTemplate.filter(
-              (x) => x?.id && x?.nombre && x?.instructorId && x?.horario,
-            )
-          : [],
-      );
-    } catch {
-      setInstructoresConfig([]);
-      setClasesTemplateConfig([]);
-    }
+    const load = async () => {
+      try {
+        const supabase = createSupabaseClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+        const { data: perfil } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+        if (!perfil?.franquicia_id) return;
+
+        const { data: instRows } = await supabase
+          .from("instructores")
+          .select("id,nombre")
+          .eq("franquicia_id", perfil.franquicia_id)
+          .order("nombre", { ascending: true });
+
+        setInstructoresConfig(
+          (instRows ?? [])
+            .filter((x) => x.id && x.nombre)
+            .map((x) => ({ id: x.id, nombre: x.nombre })),
+        );
+
+        const { data: tplRows } = await supabase
+          .from("plantillas_clases")
+          .select("id,nombre,instructor_id,horario")
+          .eq("franquicia_id", perfil.franquicia_id)
+          .eq("activo", true)
+          .order("horario", { ascending: true });
+
+        setClasesTemplateConfig(
+          (tplRows ?? [])
+            .filter((x) => x.id && x.nombre && x.instructor_id && x.horario)
+            .map((x) => ({
+              id: x.id,
+              nombre: x.nombre,
+              instructorId: x.instructor_id,
+              horario: x.horario,
+            })),
+        );
+      } catch {
+        setInstructoresConfig([]);
+        setClasesTemplateConfig([]);
+      }
+    };
+    void load();
   }, []);
 
   const clasesBase = useMemo(() => {
