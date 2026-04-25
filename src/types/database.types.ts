@@ -184,6 +184,7 @@ export type Database = {
           nombre: string;
           instructor_id: string;
           horario: string;
+          dia_semana: "lun" | "mar" | "mie" | "jue" | "vie" | "sab";
           cupo_maximo: number | null;
           orden: number;
           activo: boolean;
@@ -195,6 +196,7 @@ export type Database = {
           nombre: string;
           instructor_id: string;
           horario: string;
+          dia_semana: "lun" | "mar" | "mie" | "jue" | "vie" | "sab";
           cupo_maximo?: number | null;
           orden?: number;
           activo?: boolean;
@@ -206,6 +208,7 @@ export type Database = {
           nombre?: string;
           instructor_id?: string;
           horario?: string;
+          dia_semana?: "lun" | "mar" | "mie" | "jue" | "vie" | "sab";
           cupo_maximo?: number | null;
           orden?: number;
           activo?: boolean;

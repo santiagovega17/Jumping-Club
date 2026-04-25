@@ -5,7 +5,7 @@ import { SectionHeading } from "@/components/SectionHeading";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { PAGE_SUBTITLE_CLASS, PAGE_TITLE_CLASS } from "@/lib/headings";
+import { PAGE_TITLE_CLASS } from "@/lib/headings";
 import { toast } from "sonner";
 
 export default function PerfilPage() {
@@ -26,10 +26,7 @@ export default function PerfilPage() {
 
   return (
     <div>
-      <h1 className={PAGE_TITLE_CLASS}>Mi Perfil</h1>
-      <p className={PAGE_SUBTITLE_CLASS}>
-        Espacio personal del socio para revisar y actualizar sus datos.
-      </p>
+      <h1 className={cn(PAGE_TITLE_CLASS, "mb-8")}>Mi Perfil</h1>
 
       <section className="glass mt-8 rounded-2xl p-6 md:p-8">
         <div className="flex items-center justify-between gap-3">

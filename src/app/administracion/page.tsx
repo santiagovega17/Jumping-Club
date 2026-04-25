@@ -70,7 +70,6 @@ import { PremiumCardTitle, PremiumSheetTitle } from "@/components/PremiumTitle";
 import { SectionHeading } from "@/components/SectionHeading";
 import {
   KPI_TITLE_CLASS,
-  PAGE_SUBTITLE_CLASS,
   PAGE_TITLE_CLASS,
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
@@ -622,9 +621,6 @@ export default function AdministracionPage() {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="mb-8">
           <h1 className={PAGE_TITLE_CLASS}>Balance de Caja</h1>
-          <p className={cn(PAGE_SUBTITLE_CLASS, "max-w-2xl")}>
-            Movimientos, saldos y proyección según el período seleccionado.
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Popover>
@@ -1424,7 +1420,6 @@ export default function AdministracionPage() {
                   setDraft((d) => ({ ...d, observaciones: e.target.value }))
                 }
                 disabled={fieldsDisabled}
-                placeholder="Notas internas"
                 className="border-zinc-800 bg-zinc-950"
               />
             </div>

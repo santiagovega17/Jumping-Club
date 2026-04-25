@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Calendar, Clock3, User } from "lucide-react";
 import { SectionHeading } from "@/components/SectionHeading";
 import { Button } from "@/components/ui/button";
-import { PAGE_SUBTITLE_CLASS, PAGE_TITLE_CLASS } from "@/lib/headings";
+import { PAGE_TITLE_CLASS } from "@/lib/headings";
 
 export default function InicioSocioPage() {
   return (
@@ -13,9 +13,6 @@ export default function InicioSocioPage() {
         <h1 className={PAGE_TITLE_CLASS}>
           ¡Hola, Santiago! Prepárate para saltar.
         </h1>
-        <p className={PAGE_SUBTITLE_CLASS}>
-          Tu panel personal para organizar clases y seguir tu plan.
-        </p>
       </div>
 
       <section className="glass mt-8 rounded-2xl p-5 md:p-6">

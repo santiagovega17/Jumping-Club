@@ -44,7 +44,6 @@ import {
 import { PremiumCardTitle } from "@/components/PremiumTitle";
 import { SectionHeading } from "@/components/SectionHeading";
 import {
-  PAGE_SUBTITLE_CLASS,
   PAGE_TITLE_CLASS,
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
@@ -85,10 +84,32 @@ type DaySchedule = {
   tarde: BlockSchedule;
 };
 
+function hasVisibleDescription(value: string | null | undefined): boolean {
+  return (value ?? "").trim().length > 0;
+}
+
+function toMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map((x) => Number(x) || 0);
+  return h * 60 + m;
+}
+
+function isInsideOpenSchedule(day: DaySchedule, horario: string): boolean {
+  const start = toMinutes(horario);
+  const end = start + 60;
+  const blocks = [day.manana, day.tarde].filter((b) => b.enabled);
+  if (blocks.length === 0) return false;
+  return blocks.some((block) => {
+    const blockStart = toMinutes(block.inicio);
+    const blockEnd = toMinutes(block.fin);
+    return start >= blockStart && end <= blockEnd;
+  });
+}
+
 type Pase = {
   id: string;
   nombre: string;
   precio: number;
+  estado?: string | null;
 };
 
 type Instructor = {
@@ -237,6 +258,9 @@ export default function ConfiguracionPage() {
 
   const [nuevoPaseNombre, setNuevoPaseNombre] = useState("");
   const [nuevoPasePrecio, setNuevoPasePrecio] = useState("");
+  const [planesVista, setPlanesVista] = useState<"activos" | "archivados" | "todos">(
+    "activos",
+  );
 
   const [nuevaForma, setNuevaForma] = useState("");
 
@@ -266,9 +290,8 @@ export default function ConfiguracionPage() {
     const [planesRes, instRes, fpRes, ccRes, plRes] = await Promise.all([
       supabase
         .from("planes")
-        .select("id,nombre,precio,version")
+        .select("id,nombre,precio,estado")
         .eq("franquicia_id", franquiciaId)
-        .eq("estado", "activo")
         .order("nombre", { ascending: true }),
       supabase
         .from("instructores")
@@ -303,8 +326,9 @@ export default function ConfiguracionPage() {
         ...c,
         pases: planesRes.data.map((p) => ({
           id: p.id,
-          nombre: p.version ? `${p.nombre} (${p.version})` : p.nombre,
+          nombre: p.nombre,
           precio: Math.round(Number(p.precio) || 0),
+          estado: p.estado,
         })),
       }));
     }
@@ -324,7 +348,11 @@ export default function ConfiguracionPage() {
     if (!fpRes.error && fpRes.data) setFormasPagoRows(fpRes.data);
     else setFormasPagoRows([]);
 
-    if (!ccRes.error && ccRes.data) setConceptosCajaRows(ccRes.data);
+    if (!ccRes.error && ccRes.data) {
+      setConceptosCajaRows(
+        ccRes.data.filter((row) => row.descripcion.trim().toLowerCase() !== "general"),
+      );
+    }
     else setConceptosCajaRows([]);
 
     if (!plRes.error && plRes.data) setPlantillasRows(plRes.data);
@@ -421,6 +449,11 @@ export default function ConfiguracionPage() {
     [instructoresRows],
   );
 
+  const plantillasFiltradas = useMemo(
+    () => plantillasRows.filter((tpl) => tpl.dia_semana === selectedDay),
+    [plantillasRows, selectedDay],
+  );
+
   const addPase = async () => {
     const nombre = nuevoPaseNombre.trim();
     const precio = Math.max(0, Math.round(Number(nuevoPasePrecio) || 0));
@@ -436,7 +469,6 @@ export default function ConfiguracionPage() {
         franquicia_id: adminFranquiciaId,
         nombre,
         precio,
-        version: "v1",
         estado: "activo",
       });
 
@@ -445,23 +477,7 @@ export default function ConfiguracionPage() {
         return;
       }
 
-      const { data: planes, error: loadError } = await supabase
-        .from("planes")
-        .select("id,nombre,precio,version")
-        .eq("franquicia_id", adminFranquiciaId)
-        .eq("estado", "activo")
-        .order("nombre", { ascending: true });
-
-      if (!loadError && planes) {
-        setConfig((c) => ({
-          ...c,
-          pases: planes.map((p) => ({
-            id: p.id,
-            nombre: p.version ? `${p.nombre} (${p.version})` : p.nombre,
-            precio: Math.round(Number(p.precio) || 0),
-          })),
-        }));
-      }
+      await refreshFranquiciaData(adminFranquiciaId);
       setNuevoPaseNombre("");
       setNuevoPasePrecio("");
       toast.success("Plan creado correctamente");
@@ -490,12 +506,33 @@ export default function ConfiguracionPage() {
     }
   };
 
+  const restorePase = async (id: string) => {
+    if (!adminFranquiciaId) return;
+    try {
+      const supabase = createSupabaseClient();
+      const { error } = await supabase
+        .from("planes")
+        .update({ estado: "activo" })
+        .eq("id", id)
+        .eq("franquicia_id", adminFranquiciaId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      await refreshFranquiciaData(adminFranquiciaId);
+      toast.success("Plan restaurado correctamente");
+    } catch {
+      toast.error("No se pudo restaurar el plan");
+    }
+  };
+
   const addForma = async () => {
     const t = nuevaForma.trim();
     if (!t || !adminFranquiciaId) return;
     if (
       formasPagoRows.some((x) => x.nombre.toLowerCase() === t.toLowerCase())
     ) {
+      toast.error("Esta forma de pago ya existe");
       return;
     }
     try {
@@ -507,14 +544,21 @@ export default function ConfiguracionPage() {
         activo: true,
       });
       if (error) {
-        toast.error(error.message);
-        return;
+        if (error.code === "23505" || error.message.includes("duplicate")) {
+          return toast.error("Esta forma de pago ya existe");
+        }
+        return toast.error("Error al guardar la forma de pago");
       }
       setNuevaForma("");
       await refreshFranquiciaData(adminFranquiciaId);
       toast.success("Forma de pago agregada correctamente");
-    } catch {
-      toast.error("No se pudo agregar la forma de pago");
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message.toLowerCase() : "";
+      if (message.includes("23505") || message.includes("duplicate")) {
+        return toast.error("Esta forma de pago ya existe");
+      }
+      return toast.error("Error al guardar la forma de pago");
     }
   };
 
@@ -547,7 +591,7 @@ export default function ConfiguracionPage() {
         franquicia_id: adminFranquiciaId,
         tipo,
         concepto: t,
-        descripcion: "General",
+        descripcion: "",
         orden: 0,
       });
       if (error) {
@@ -629,12 +673,26 @@ export default function ConfiguracionPage() {
 
   const removeDescripcionRow = async (id: string) => {
     if (!adminFranquiciaId) return;
+    const target = conceptosCajaRows.find((row) => row.id === id);
+    if (!target) return;
+    const siblings = conceptosCajaRows.filter(
+      (row) =>
+        row.tipo === target.tipo &&
+        row.concepto === target.concepto &&
+        row.franquicia_id === target.franquicia_id,
+    );
     try {
       const supabase = createSupabaseClient();
-      const { error } = await supabase
-        .from("conceptos_caja")
-        .delete()
-        .eq("id", id);
+      const { error } =
+        siblings.length <= 1
+          ? await supabase
+              .from("conceptos_caja")
+              .update({ descripcion: "" })
+              .eq("id", id)
+          : await supabase
+              .from("conceptos_caja")
+              .delete()
+              .eq("id", id);
       if (error) {
         toast.error(error.message);
         return;
@@ -729,6 +787,11 @@ export default function ConfiguracionPage() {
     const horarioRaw = nuevaClaseHorario.trim().slice(0, 5);
     if (!nombre || !nuevaClaseInstructorId || !horarioRaw || !adminFranquiciaId)
       return;
+    const daySchedule = config.schedules[selectedDay];
+    if (!isInsideOpenSchedule(daySchedule, horarioRaw)) {
+      toast.error("El horario de la clase está fuera del horario de apertura del club");
+      return;
+    }
     try {
       const supabase = createSupabaseClient();
       const { error } = await supabase.from("plantillas_clases").insert({
@@ -736,6 +799,7 @@ export default function ConfiguracionPage() {
         nombre,
         instructor_id: nuevaClaseInstructorId,
         horario: horarioRaw,
+        dia_semana: selectedDay,
         orden: plantillasRows.length,
         activo: true,
       });
@@ -775,15 +839,17 @@ export default function ConfiguracionPage() {
   const cardClass =
     "border-zinc-800/50 bg-card shadow-none ring-0 text-zinc-50";
 
+  const pasesFiltrados = useMemo(() => {
+    if (planesVista === "todos") return config.pases;
+    return config.pases.filter((p) =>
+      planesVista === "activos" ? p.estado !== "inactivo" : p.estado === "inactivo",
+    );
+  }, [config.pases, planesVista]);
+
   return (
     <div className="min-w-0 font-sans text-zinc-50">
       <div className="mb-8">
         <h1 className={PAGE_TITLE_CLASS}>Configuración</h1>
-        <p className={cn(PAGE_SUBTITLE_CLASS, "max-w-2xl")}>
-          Pases, formas de pago, conceptos de caja, instructores y plantillas se
-          guardan en la base por franquicia. Los horarios semanales siguen en
-          este navegador.
-        </p>
       </div>
 
       <Tabs defaultValue="pases" className="w-full min-w-0">
@@ -828,8 +894,8 @@ export default function ConfiguracionPage() {
             <CardHeader>
               <PremiumCardTitle>Planes del gimnasio</PremiumCardTitle>
               <CardDescription className="text-sm text-zinc-500">
-                Definí los pases con nombre y precio mensual. Podés agregar o
-                quitar filas en cualquier momento.
+                Los planes son inmutables en nombre/precio: para actualizar un valor,
+                creá uno nuevo y archivá el anterior.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -844,7 +910,6 @@ export default function ConfiguracionPage() {
                       id="pase-nombre"
                       value={nuevoPaseNombre}
                       onChange={(e) => setNuevoPaseNombre(e.target.value)}
-                      placeholder="Ej. Plan Full"
                       className="border-zinc-800 bg-zinc-950 text-zinc-100"
                     />
                   </div>
@@ -859,7 +924,6 @@ export default function ConfiguracionPage() {
                       step={500}
                       value={nuevoPasePrecio}
                       onChange={(e) => setNuevoPasePrecio(e.target.value)}
-                      placeholder="25000"
                       className="border-zinc-800 bg-zinc-950 text-zinc-100"
                     />
                   </div>
@@ -875,58 +939,85 @@ export default function ConfiguracionPage() {
               </div>
 
               <div>
-                <p className={cn(LABEL_TECH, "mb-2")}>Pases actuales</p>
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-zinc-800/50 hover:bg-transparent">
-                      <TableHead className={LABEL_TECH}>Nombre</TableHead>
-                      <TableHead className={cn("text-right", LABEL_TECH)}>
-                        Precio
-                      </TableHead>
-                      <TableHead className="w-12 text-right">
-                        <span className="sr-only">Eliminar</span>
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {config.pases.length === 0 ? (
-                      <TableRow className="border-zinc-800/50">
-                        <TableCell
-                          colSpan={3}
-                          className="py-8 text-center text-sm text-zinc-500"
-                        >
-                          No hay pases cargados. Agregá el primero arriba.
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      config.pases.map((p) => (
-                        <TableRow
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <p className={LABEL_TECH}>Planes</p>
+                  <div className="inline-flex rounded-lg border border-zinc-800/70 bg-zinc-950/50 p-1">
+                    {(["activos", "archivados", "todos"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setPlanesVista(mode)}
+                        className={cn(
+                          "rounded-md px-2.5 py-1 text-xs font-semibold capitalize transition-colors",
+                          planesVista === mode
+                            ? "bg-[#e41b68]/20 text-[#ff8fb8]"
+                            : "text-zinc-400 hover:text-zinc-200",
+                        )}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {pasesFiltrados.length === 0 ? (
+                  <div className="rounded-xl border border-zinc-800/50 bg-zinc-950/50 py-8 text-center text-sm text-zinc-500">
+                    Sin registros.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+                    {pasesFiltrados.map((p) => {
+                      const archivado = p.estado === "inactivo";
+                      return (
+                        <article
                           key={p.id}
-                          className="border-zinc-800/50 hover:bg-zinc-800/30"
+                          className={cn(
+                            "rounded-2xl border border-zinc-800 bg-zinc-900 p-6",
+                            archivado && "opacity-70",
+                          )}
                         >
-                          <TableCell className="font-medium text-zinc-100">
-                            {p.nombre}
-                          </TableCell>
-                          <TableCell className="text-right font-mono text-sm text-zinc-200">
+                          <div className="flex items-start justify-between gap-3">
+                            <h4 className="text-xl font-bold text-zinc-100">{p.nombre}</h4>
+                            <span
+                              className={cn(
+                                "inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold",
+                                archivado
+                                  ? "border-zinc-600 bg-zinc-800/80 text-zinc-300"
+                                  : "border-[#5ab253]/40 bg-[#5ab253]/15 text-[#5ab253]",
+                              )}
+                            >
+                              {archivado ? "Archivado" : "Activo"}
+                            </span>
+                          </div>
+
+                          <p className="my-4 text-3xl font-extrabold tracking-tight text-zinc-50">
                             {formatPesos(p.precio)}
-                          </TableCell>
-                          <TableCell className="text-right">
+                          </p>
+
+                          <div className="mt-4 border-t border-zinc-800/70 pt-4">
                             <Button
                               type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
-                              onClick={() => void removePase(p.id)}
-                              aria-label={`Eliminar ${p.nombre}`}
+                              variant="outline"
+                              className={cn(
+                                "w-full border-zinc-700 bg-transparent",
+                                archivado
+                                  ? "text-zinc-200 hover:bg-zinc-800"
+                                  : "text-[#e41b68] hover:bg-[#e41b68]/10 hover:text-[#e41b68]",
+                              )}
+                              onClick={() =>
+                                archivado
+                                  ? void restorePase(p.id)
+                                  : void removePase(p.id)
+                              }
+                              aria-label={`${archivado ? "Restaurar" : "Archivar"} ${p.nombre}`}
                             >
-                              <Trash2 className="size-4" />
+                              {archivado ? "Restaurar" : "Archivar"}
                             </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -948,7 +1039,6 @@ export default function ConfiguracionPage() {
                   <Input
                     value={nuevaForma}
                     onChange={(e) => setNuevaForma(e.target.value)}
-                    placeholder="Ej. QR / Billetera virtual"
                     className="border-zinc-800 bg-zinc-950 text-zinc-100 sm:flex-1"
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
@@ -1019,7 +1109,6 @@ export default function ConfiguracionPage() {
                         id="nuevo-concepto-ing"
                         value={nuevoConceptoIng}
                         onChange={(e) => setNuevoConceptoIng(e.target.value)}
-                        placeholder="Ej. Bonificaciones"
                         className="border-zinc-800 bg-zinc-950 text-zinc-100"
                       />
                     </div>
@@ -1039,7 +1128,7 @@ export default function ConfiguracionPage() {
                   ) : (
                     <Accordion
                       type="multiple"
-                      className="rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
+                      className="h-auto rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
                     >
                       {ingresosGrouped.map(([concepto, rows]) => (
                         <AccordionItem
@@ -1067,9 +1156,11 @@ export default function ConfiguracionPage() {
                               <Trash2 className="size-4" />
                             </Button>
                           </div>
-                          <AccordionContent>
+                          <AccordionContent className="h-auto overflow-visible pb-4">
                             <div className="flex flex-wrap gap-2 pb-2">
-                              {rows.map((row) => (
+                              {rows
+                                .filter((row) => hasVisibleDescription(row.descripcion))
+                                .map((row) => (
                                 <span
                                   key={row.id}
                                   className="inline-flex items-center gap-1 rounded-md border border-zinc-800/80 bg-zinc-900/60 px-2 py-1 text-xs text-zinc-200"
@@ -1088,7 +1179,7 @@ export default function ConfiguracionPage() {
                                 </span>
                               ))}
                             </div>
-                            <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3 sm:flex-row">
+                            <div className="relative mb-2 flex h-auto flex-col gap-2 border-t border-zinc-800/50 pt-3 pb-3 sm:flex-row">
                               <Input
                                 value={
                                   descDrafts[`ing-${concepto}`] ?? ""
@@ -1099,7 +1190,6 @@ export default function ConfiguracionPage() {
                                     [`ing-${concepto}`]: e.target.value,
                                   }))
                                 }
-                                placeholder="Nueva descripción"
                                 className="border-zinc-800 bg-zinc-950 text-sm text-zinc-100 sm:flex-1"
                               />
                               <Button
@@ -1136,7 +1226,6 @@ export default function ConfiguracionPage() {
                         id="nuevo-concepto-egr"
                         value={nuevoConceptoEgr}
                         onChange={(e) => setNuevoConceptoEgr(e.target.value)}
-                        placeholder="Ej. Marketing"
                         className="border-zinc-800 bg-zinc-950 text-zinc-100"
                       />
                     </div>
@@ -1156,7 +1245,7 @@ export default function ConfiguracionPage() {
                   ) : (
                     <Accordion
                       type="multiple"
-                      className="rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
+                      className="h-auto rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
                     >
                       {egresosGrouped.map(([concepto, rows]) => (
                         <AccordionItem
@@ -1184,9 +1273,11 @@ export default function ConfiguracionPage() {
                               <Trash2 className="size-4" />
                             </Button>
                           </div>
-                          <AccordionContent>
+                          <AccordionContent className="h-auto overflow-visible pb-4">
                             <div className="flex flex-wrap gap-2 pb-2">
-                              {rows.map((row) => (
+                              {rows
+                                .filter((row) => hasVisibleDescription(row.descripcion))
+                                .map((row) => (
                                 <span
                                   key={row.id}
                                   className="inline-flex items-center gap-1 rounded-md border border-zinc-800/80 bg-zinc-900/60 px-2 py-1 text-xs text-zinc-200"
@@ -1205,7 +1296,7 @@ export default function ConfiguracionPage() {
                                 </span>
                               ))}
                             </div>
-                            <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3 sm:flex-row">
+                            <div className="relative mb-2 flex h-auto flex-col gap-2 border-t border-zinc-800/50 pt-3 pb-3 sm:flex-row">
                               <Input
                                 value={
                                   descDrafts[`egr-${concepto}`] ?? ""
@@ -1216,7 +1307,6 @@ export default function ConfiguracionPage() {
                                     [`egr-${concepto}`]: e.target.value,
                                   }))
                                 }
-                                placeholder="Nueva descripción"
                                 className="border-zinc-800 bg-zinc-950 text-sm text-zinc-100 sm:flex-1"
                               />
                               <Button
@@ -1267,7 +1357,6 @@ export default function ConfiguracionPage() {
                       id="instructor-nombre"
                       value={nuevoInstructorNombre}
                       onChange={(e) => setNuevoInstructorNombre(e.target.value)}
-                      placeholder="Ej. Agustina Díaz"
                       className="border-zinc-800 bg-zinc-950 text-zinc-100"
                     />
                   </div>
@@ -1281,7 +1370,6 @@ export default function ConfiguracionPage() {
                       onChange={(e) =>
                         setNuevoInstructorEspecialidad(e.target.value)
                       }
-                      placeholder="Ej. Yoga"
                       className="border-zinc-800 bg-zinc-950 text-zinc-100"
                     />
                   </div>
@@ -1517,8 +1605,8 @@ export default function ConfiguracionPage() {
                 Plantillas de clases globales
               </PremiumCardTitle>
               <CardDescription className="text-sm text-zinc-500">
-                Definí nombre, instructor y horario fijo para reutilizar en el
-                calendario diario.
+                Definí nombre, instructor y horario fijo para el día seleccionado
+                en el selector superior.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -1533,7 +1621,6 @@ export default function ConfiguracionPage() {
                       id="tpl-nombre"
                       value={nuevaClaseNombre}
                       onChange={(e) => setNuevaClaseNombre(e.target.value)}
-                      placeholder="Ej. Funcional"
                       className="border-zinc-800 bg-zinc-950 text-zinc-100"
                     />
                   </div>
@@ -1583,10 +1670,15 @@ export default function ConfiguracionPage() {
                     </Button>
                   </div>
                 </div>
+                <p className="mt-3 text-xs text-zinc-500">
+                  Día asignado automáticamente: {DAY_LABELS[selectedDay]}.
+                </p>
               </div>
 
               <div>
-                <p className={cn(LABEL_TECH, "mb-2")}>Plantillas cargadas</p>
+                <p className={cn(LABEL_TECH, "mb-2")}>
+                  Plantillas cargadas ({DAY_LABELS[selectedDay]})
+                </p>
                 <Table>
                   <TableHeader>
                     <TableRow className="border-zinc-800/50 hover:bg-transparent">
@@ -1599,7 +1691,7 @@ export default function ConfiguracionPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {plantillasRows.length === 0 ? (
+                    {plantillasFiltradas.length === 0 ? (
                       <TableRow className="border-zinc-800/50">
                         <TableCell
                           colSpan={4}
@@ -1609,7 +1701,7 @@ export default function ConfiguracionPage() {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      plantillasRows.map((tpl) => (
+                      plantillasFiltradas.map((tpl) => (
                         <TableRow
                           key={tpl.id}
                           className="border-zinc-800/50 hover:bg-zinc-800/30"

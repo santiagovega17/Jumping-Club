@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS plantillas_clases (
   nombre TEXT NOT NULL,
   instructor_id UUID NOT NULL REFERENCES instructores (id) ON DELETE RESTRICT,
   horario TEXT NOT NULL,
+  dia_semana TEXT NOT NULL CHECK (dia_semana IN ('lun', 'mar', 'mie', 'jue', 'vie', 'sab')),
   cupo_maximo INTEGER,
   orden INTEGER NOT NULL DEFAULT 0,
   activo BOOLEAN NOT NULL DEFAULT true,

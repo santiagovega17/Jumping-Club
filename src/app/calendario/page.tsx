@@ -32,7 +32,6 @@ import { SectionHeading } from "@/components/SectionHeading";
 import {
   KPI_TITLE_CLASS,
   LABEL_TECH,
-  PAGE_SUBTITLE_CLASS,
   PAGE_TITLE_CLASS,
   SHEET_HEADING_CLASS,
 } from "@/lib/headings";
@@ -42,6 +41,9 @@ import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 
 const capacidadTotal = 20;
 type Role = "administracion" | "socio";
+const STORAGE_KEY = "jumping-club-config-v1";
+const DAY_IDS = ["lun", "mar", "mie", "jue", "vie", "sab"] as const;
+type DayId = (typeof DAY_IDS)[number];
 
 type ClassSheetContext = "new" | "edit";
 
@@ -55,6 +57,18 @@ type ClaseTemplateConfig = {
   nombre: string;
   instructorId: string;
   horario: string;
+  diaSemana: DayId;
+};
+
+type BlockSchedule = {
+  enabled: boolean;
+  inicio: string;
+  fin: string;
+};
+
+type DaySchedule = {
+  manana: BlockSchedule;
+  tarde: BlockSchedule;
 };
 
 function getDiasSelector() {
@@ -107,6 +121,21 @@ function horaToTimeValue(hora: string) {
   return `${hh}:${m[2]}`;
 }
 
+function weekdayToDayId(day: number): DayId | null {
+  if (day === 1) return "lun";
+  if (day === 2) return "mar";
+  if (day === 3) return "mie";
+  if (day === 4) return "jue";
+  if (day === 5) return "vie";
+  if (day === 6) return "sab";
+  return null;
+}
+
+function toMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map((x) => Number(x) || 0);
+  return h * 60 + m;
+}
+
 export default function CalendarioPage() {
   const diasSelector = useMemo(() => getDiasSelector(), []);
   const [role] = useState<Role>(() => {
@@ -139,8 +168,24 @@ export default function CalendarioPage() {
   const [sheetCupo, setSheetCupo] = useState(String(capacidadTotal));
   const [sheetNombreClase, setSheetNombreClase] = useState("");
   const [sheetInstructorId, setSheetInstructorId] = useState("");
+  const [schedulesConfig, setSchedulesConfig] = useState<Record<DayId, DaySchedule> | null>(null);
 
   const selectedDateKey = selectedDate.toISOString().slice(0, 10);
+  const selectedDayId = weekdayToDayId(selectedDate.getDay());
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        schedules?: Record<DayId, DaySchedule>;
+      };
+      if (parsed.schedules) setSchedulesConfig(parsed.schedules);
+    } catch {
+      setSchedulesConfig(null);
+    }
+  }, []);
 
   useEffect(() => {
     const load = async () => {
@@ -171,19 +216,27 @@ export default function CalendarioPage() {
 
         const { data: tplRows } = await supabase
           .from("plantillas_clases")
-          .select("id,nombre,instructor_id,horario")
+          .select("id,nombre,instructor_id,horario,dia_semana")
           .eq("franquicia_id", perfil.franquicia_id)
           .eq("activo", true)
           .order("horario", { ascending: true });
 
         setClasesTemplateConfig(
           (tplRows ?? [])
-            .filter((x) => x.id && x.nombre && x.instructor_id && x.horario)
+            .filter(
+              (x) =>
+                x.id &&
+                x.nombre &&
+                x.instructor_id &&
+                x.horario &&
+                DAY_IDS.includes((x.dia_semana ?? "") as DayId),
+            )
             .map((x) => ({
               id: x.id,
               nombre: x.nombre,
               instructorId: x.instructor_id,
               horario: x.horario,
+              diaSemana: x.dia_semana as DayId,
             })),
         );
       } catch {
@@ -195,17 +248,32 @@ export default function CalendarioPage() {
   }, []);
 
   const clasesBase = useMemo(() => {
-    if (clasesTemplateConfig.length === 0) return [];
-    return [...new Set(clasesTemplateConfig.map((tpl) => tpl.horario))].sort();
-  }, [clasesTemplateConfig]);
+    if (!selectedDayId || clasesTemplateConfig.length === 0) return [];
+    return [
+      ...new Set(
+        clasesTemplateConfig
+          .filter((tpl) => tpl.diaSemana === selectedDayId)
+          .map((tpl) => tpl.horario),
+      ),
+    ].sort();
+  }, [clasesTemplateConfig, selectedDayId]);
 
   const instructorNombreById = useMemo(
     () => Object.fromEntries(instructoresConfig.map((inst) => [inst.id, inst.nombre])),
     [instructoresConfig],
   );
   const nombresClaseDisponibles = useMemo(
-    () => [...new Set(clasesTemplateConfig.map((tpl) => tpl.nombre))],
-    [clasesTemplateConfig],
+    () =>
+      selectedDayId
+        ? [
+            ...new Set(
+              clasesTemplateConfig
+                .filter((tpl) => tpl.diaSemana === selectedDayId)
+                .map((tpl) => tpl.nombre),
+            ),
+          ]
+        : [],
+    [clasesTemplateConfig, selectedDayId],
   );
 
   const clasesActivasDelDia = useMemo(() => {
@@ -226,7 +294,9 @@ export default function CalendarioPage() {
   const getClaseInfo = (hora: string, dateKey: string) => {
     const override = detalleClasePorDia[dateKey]?.[hora];
     if (override) return override;
-    const template = clasesTemplateConfig.find((tpl) => tpl.horario === hora);
+    const template = clasesTemplateConfig.find(
+      (tpl) => tpl.horario === hora && tpl.diaSemana === selectedDayId,
+    );
     if (template) {
       return { nombre: template.nombre, instructorId: template.instructorId };
     }
@@ -298,6 +368,22 @@ export default function CalendarioPage() {
     if (!hRaw || !nombreClase || !sheetInstructorId) return;
     const h = horaToTimeValue(hRaw);
     const cupo = Math.min(60, Math.max(1, Math.round(Number(sheetCupo) || capacidadTotal)));
+
+    const daySchedule = selectedDayId ? schedulesConfig?.[selectedDayId] : null;
+    const hasOpenBlocks =
+      !!daySchedule && (daySchedule.manana.enabled || daySchedule.tarde.enabled);
+    const start = toMinutes(h);
+    const end = start + 60;
+    const isWithinOpening =
+      !!daySchedule &&
+      [daySchedule.manana, daySchedule.tarde]
+        .filter((b) => b.enabled)
+        .some((b) => start >= toMinutes(b.inicio) && end <= toMinutes(b.fin));
+
+    if (!hasOpenBlocks || !isWithinOpening) {
+      toast.error("El horario de la clase está fuera del horario de apertura del club");
+      return;
+    }
 
     if (classSheetContext === "new") {
       if (clasesActivasDelDia.includes(h)) {
@@ -405,10 +491,7 @@ export default function CalendarioPage() {
 
   return (
     <div>
-      <h1 className={PAGE_TITLE_CLASS}>Calendario de Clases</h1>
-      <p className={PAGE_SUBTITLE_CLASS}>
-        Clases por día con vista adaptada para socios y administración.
-      </p>
+      <h1 className={cn(PAGE_TITLE_CLASS, "mb-8")}>Calendario de Clases</h1>
 
       {role === "administracion" ? (
         <section className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -721,7 +804,6 @@ export default function CalendarioPage() {
                     id="sheet-clase"
                     value={sheetNombreClase}
                     onChange={(e) => setSheetNombreClase(e.target.value)}
-                    placeholder="Ej. Funcional"
                     className="border-zinc-800 bg-zinc-900 text-zinc-100"
                   />
                 )}

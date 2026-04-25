@@ -42,7 +42,7 @@ import {
 import { Alert, AlertTitle } from "@/components/ui/alert";
 import { SectionHeading } from "@/components/SectionHeading";
 import { PremiumDialogTitle, PremiumSheetTitle } from "@/components/PremiumTitle";
-import { PAGE_SUBTITLE_CLASS, PAGE_TITLE_CLASS } from "@/lib/headings";
+import { PAGE_TITLE_CLASS } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
@@ -337,7 +337,6 @@ function formularioNuevoVacio(): NuevoSocioForm {
 type PlanOption = {
   id: string;
   nombre: string;
-  version: string | null;
   precio: number;
   franquicia_id: string | null;
   estado: string | null;
@@ -410,7 +409,7 @@ export default function SociosPage() {
 
         const { data: planes, error: planesError } = await supabase
           .from("planes")
-          .select("id,nombre,version,precio,franquicia_id,estado")
+          .select("id,nombre,precio,franquicia_id,estado")
           .eq("franquicia_id", perfil.franquicia_id)
           .eq("estado", "activo")
           .order("nombre", { ascending: true });
@@ -420,9 +419,7 @@ export default function SociosPage() {
           setNuevoForm((f) => {
             if (f.planId || planes.length === 0) return f;
             const defaultPlan = planes[0] as PlanOption;
-            const planLabel = defaultPlan.version
-              ? `${defaultPlan.nombre} (${defaultPlan.version})`
-              : defaultPlan.nombre;
+            const planLabel = defaultPlan.nombre;
             return {
               ...f,
               planId: defaultPlan.id,
@@ -658,9 +655,7 @@ export default function SociosPage() {
 
       const selectedPlan = planesActivos.find((p) => p.id === nuevoForm.planId);
       const planLabel = selectedPlan
-        ? selectedPlan.version
-          ? `${selectedPlan.nombre} (${selectedPlan.version})`
-          : selectedPlan.nombre
+        ? selectedPlan.nombre
         : nuevoForm.plan;
       const precioActual =
         selectedPlan?.precio ?? (Number(nuevoForm.precioActual) || 0);
@@ -775,9 +770,6 @@ export default function SociosPage() {
       <div>
         <div className="mb-8">
           <h1 className={PAGE_TITLE_CLASS}>Socios</h1>
-          <p className={PAGE_SUBTITLE_CLASS}>
-            La gestión de socios está disponible solo para administración.
-          </p>
         </div>
         <div className="mt-8 rounded-2xl border border-zinc-800/50 bg-card p-6 md:p-8">
           <p className="text-sm text-zinc-500">
@@ -793,9 +785,6 @@ export default function SociosPage() {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="mb-8">
           <h1 className={PAGE_TITLE_CLASS}>Gestión de Socios</h1>
-          <p className={PAGE_SUBTITLE_CLASS}>
-            Listado de alumnos con plan y estado de membresía.
-          </p>
         </div>
         <Button
           type="button"
@@ -812,7 +801,6 @@ export default function SociosPage() {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <Input
               type="search"
-              placeholder="Buscar por nombre, DNI, correo..."
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="h-10 flex-1 border-white/15 bg-black/20"
@@ -1063,7 +1051,6 @@ export default function SociosPage() {
                     setNuevoForm((f) => ({ ...f, nombre: e.target.value }))
                   }
                   className={inputPanelClass}
-                  placeholder="Ej. Pérez, Juan"
                 />
               </div>
               <div className="space-y-2">
@@ -1140,11 +1127,7 @@ export default function SociosPage() {
                   value={nuevoForm.planId}
                   onValueChange={(value) => {
                     const selected = planesActivos.find((p) => p.id === value);
-                    const planLabel = selected
-                      ? selected.version
-                        ? `${selected.nombre} (${selected.version})`
-                        : selected.nombre
-                      : "";
+                    const planLabel = selected ? selected.nombre : "";
                     setNuevoForm((f) => ({
                       ...f,
                       planId: value,
@@ -1159,7 +1142,7 @@ export default function SociosPage() {
                   <SelectContent>
                     {planesActivos.map((plan) => (
                       <SelectItem key={plan.id} value={plan.id}>
-                        {plan.version ? `${plan.nombre} (${plan.version})` : plan.nombre}
+                        {plan.nombre}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -1219,7 +1202,6 @@ export default function SociosPage() {
                       setNuevoForm((f) => ({ ...f, numeroTarjeta: e.target.value }))
                     }
                     className={inputPanelClass}
-                    placeholder="Ej. 4500 1234 5678 0000"
                   />
                 </div>
               ) : null}
@@ -1280,7 +1262,6 @@ export default function SociosPage() {
               rows={4}
               value={motivoBaja}
               onChange={(e) => setMotivoBaja(e.target.value)}
-              placeholder="Ej. Falta de pago"
               className={cn(
                 "min-h-[100px] w-full resize-y rounded-lg border px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
                 inputPanelClass

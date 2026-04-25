@@ -11,7 +11,6 @@ import { Button } from "@/components/ui/button";
 import { SectionHeading } from "@/components/SectionHeading";
 import {
   KPI_TITLE_CLASS,
-  PAGE_SUBTITLE_CLASS,
   PAGE_TITLE_CLASS,
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
@@ -78,12 +77,7 @@ export default function DashboardPage() {
 
   return (
     <div className="min-w-0 font-sans">
-      <h1 className={PAGE_TITLE_CLASS}>Dashboard</h1>
-      <p className={PAGE_SUBTITLE_CLASS}>
-        {role === "admin"
-          ? "Resumen financiero y operativo de Jumping Club."
-          : "Tu panel rápido para reservar y seguir tu actividad."}
-      </p>
+      <h1 className={cn(PAGE_TITLE_CLASS, "mb-8")}>Dashboard</h1>
 
       {role === "admin" ? (
         <div className="mt-8 space-y-6 md:space-y-8">

@@ -35,11 +35,35 @@ CREATE TABLE IF NOT EXISTS plantillas_clases (
   nombre TEXT NOT NULL,
   instructor_id UUID NOT NULL REFERENCES instructores (id) ON DELETE RESTRICT,
   horario TEXT NOT NULL,
+  dia_semana TEXT NOT NULL CHECK (dia_semana IN ('lun', 'mar', 'mie', 'jue', 'vie', 'sab')),
   cupo_maximo INTEGER,
   orden INTEGER NOT NULL DEFAULT 0,
   activo BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT timezone ('utc'::text, now())
 );
+
+ALTER TABLE plantillas_clases
+  ADD COLUMN IF NOT EXISTS dia_semana TEXT;
+
+UPDATE plantillas_clases
+SET dia_semana = COALESCE(dia_semana, 'lun')
+WHERE dia_semana IS NULL;
+
+ALTER TABLE plantillas_clases
+  ALTER COLUMN dia_semana SET NOT NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'plantillas_clases_dia_semana_check'
+  ) THEN
+    ALTER TABLE plantillas_clases
+      ADD CONSTRAINT plantillas_clases_dia_semana_check
+      CHECK (dia_semana IN ('lun', 'mar', 'mie', 'jue', 'vie', 'sab'));
+  END IF;
+END $$;
 
 ALTER TABLE formas_pago ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conceptos_caja ENABLE ROW LEVEL SECURITY;
