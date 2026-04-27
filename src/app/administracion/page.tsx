@@ -1146,7 +1146,10 @@ export default function AdministracionPage() {
                         <TableCell>
                           {row.estado === "Pendiente" ? (
                             pendienteVencido ? (
-                              <Badge variant="destructive" className="font-normal">
+                              <Badge
+                                variant="pending"
+                                className="border-red-500/40 bg-red-500/15 text-red-300 font-normal"
+                              >
                                 <AlertTriangle className="size-3.5" />
                                 Pendiente vencido
                               </Badge>
