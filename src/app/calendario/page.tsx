@@ -106,6 +106,11 @@ type ClaseHistorialItem = {
   editadoEn: string | null;
 };
 
+type InscriptoClase = {
+  socioId: string;
+  nombre: string;
+};
+
 type BlockSchedule = {
   enabled: boolean;
   inicio: string;
@@ -559,7 +564,7 @@ export default function CalendarioPage() {
     isLoading: isLoadingInscriptosClase,
     error: inscriptosError,
     mutate: mutateInscriptosClase,
-  } = useSWR(
+  } = useSWR<InscriptoClase[]>(
     selectedClase?.classId ? ["clase-inscriptos", selectedClase.classId] : null,
     async () => {
       const result = await getInscriptosPorClaseAction(selectedClase!.classId!);
@@ -658,10 +663,12 @@ export default function CalendarioPage() {
       toast.error("No se pudo identificar la clase para inscribirte");
       return;
     }
+    const classId = selectedClase.classId;
+    const socioId = currentSocioId;
     const confirmarInscripcion = async () => {
       const result = await inscribirSocioEnClase({
-        claseId: selectedClase.classId,
-        socioId: currentSocioId,
+        claseId: classId,
+        socioId,
       });
       if (!result.ok) {
         toast.error(result.error || "No se pudo confirmar la inscripción");
@@ -681,7 +688,9 @@ export default function CalendarioPage() {
 
   const socioYaIncriptoEnClase = useMemo(() => {
     if (!currentSocioId) return false;
-    return (inscriptosClaseData ?? []).some((item) => item.socioId === currentSocioId);
+    return (inscriptosClaseData ?? []).some(
+      (item: InscriptoClase) => item.socioId === currentSocioId,
+    );
   }, [currentSocioId, inscriptosClaseData]);
 
   const claseSinCupo = useMemo(() => {
