@@ -2,19 +2,23 @@
 
 import Link from "next/link";
 import {
+  ArrowDownLeft,
+  ArrowUpRight,
   Calendar,
   Clock,
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { SectionHeading } from "@/components/SectionHeading";
 import {
   KPI_TITLE_CLASS,
   PAGE_TITLE_CLASS,
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import useSWR from "swr";
 import {
   Bar,
   BarChart,
@@ -25,6 +29,13 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { createClient as createSupabaseClient } from "@/lib/supabase/client";
+import {
+  getDashboardChartData,
+  getDashboardKPIs,
+  getDashboardProximosVencimientos,
+  getDashboardUltimosMovimientos,
+} from "@/actions/dashboard";
 
 type Role = "admin" | "socio";
 
@@ -35,23 +46,29 @@ const FONT_UI =
   "var(--font-sans), ui-sans-serif, system-ui, sans-serif";
 
 type ProximoVencimientoRow = {
+  id: string;
   concepto: string;
   descripcion: string;
   total: number;
   fecha: string;
 };
 
-type ChartMonthRow = { mes: string; ingresos: number; egresos: number };
+type ChartMonthRow = { name: string; ingresos: number; egresos: number };
 
 type MovimientoResumen = {
+  id: string;
   positive: boolean;
-  monto: string;
+  monto: number;
   categoria: string;
   detalle: string;
 };
 
 function formatPesos(value: number) {
-  return `$${value.toLocaleString("es-AR", { maximumFractionDigits: 0 })}`;
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    maximumFractionDigits: 0,
+  }).format(value);
 }
 
 export default function DashboardPage() {
@@ -65,14 +82,78 @@ export default function DashboardPage() {
     return "admin";
   });
 
-  const [chartReady, setChartReady] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+
+  const swrSilentOptions = {
+    keepPreviousData: true,
+    revalidateOnFocus: false,
+    dedupingInterval: 60_000,
+  } as const;
+
   useEffect(() => {
-    setChartReady(true);
+    const loadUser = async () => {
+      const supabase = createSupabaseClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      setCurrentUserId(user?.id ?? null);
+    };
+    void loadUser();
   }, []);
 
-  const proximosVencimientos: ProximoVencimientoRow[] = [];
-  const chartData: ChartMonthRow[] = [];
-  const movimientos: MovimientoResumen[] = [];
+  const { data: kpisData, isLoading: isLoadingKpis, error: kpisError } = useSWR(
+    currentUserId ? ["dashboard-kpis", currentUserId] : null,
+    async () => {
+      const result = await getDashboardKPIs(currentUserId!);
+      if (!result.ok) throw new Error(result.error);
+      return result.data;
+    },
+    swrSilentOptions,
+  );
+
+  const { data: vencimientosData, isLoading: isLoadingVencimientos, error: vencimientosError } = useSWR(
+    currentUserId ? ["dashboard-vencimientos", currentUserId] : null,
+    async () => {
+      const result = await getDashboardProximosVencimientos(currentUserId!, 5);
+      if (!result.ok) throw new Error(result.error);
+      return result.data;
+    },
+    swrSilentOptions,
+  );
+
+  const { data: chartDataResponse, isLoading: isLoadingChart, error: chartError } = useSWR(
+    currentUserId ? ["dashboard-chart", currentUserId] : null,
+    async () => {
+      const result = await getDashboardChartData(currentUserId!);
+      if (!result.ok) throw new Error(result.error);
+      return result.data;
+    },
+    swrSilentOptions,
+  );
+
+  const { data: movimientosData, isLoading: isLoadingMovimientos, error: movimientosError } = useSWR(
+    currentUserId ? ["dashboard-movimientos", currentUserId] : null,
+    async () => {
+      const result = await getDashboardUltimosMovimientos(currentUserId!, 5);
+      if (!result.ok) throw new Error(result.error);
+      return result.data;
+    },
+    swrSilentOptions,
+  );
+
+  const proximosVencimientos: ProximoVencimientoRow[] = vencimientosData ?? [];
+  const chartData: ChartMonthRow[] = chartDataResponse ?? [];
+  const movimientos: MovimientoResumen[] = useMemo(
+    () =>
+      (movimientosData ?? []).map((item) => ({
+        id: item.id,
+        positive: item.tipo === "ingreso",
+        monto: item.monto,
+        categoria: item.tipo === "ingreso" ? "Ingreso" : "Egreso",
+        detalle: item.descripcion?.trim() ? `${item.concepto} · ${item.descripcion}` : item.concepto,
+      })),
+    [movimientosData],
+  );
   const tieneDatosGrafico = chartData.length > 0;
 
   return (
@@ -81,14 +162,26 @@ export default function DashboardPage() {
 
       {role === "admin" ? (
         <div className="mt-8 space-y-6 md:space-y-8">
+          {kpisError || vencimientosError || chartError || movimientosError ? (
+            <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              Ocurrió un error cargando el dashboard.
+            </div>
+          ) : null}
           <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5 lg:grid-cols-3">
             <article className="rounded-2xl border border-zinc-800/50 bg-card p-5">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <p className={KPI_TITLE_CLASS}>Ingresos</p>
-                  <p className="mt-4 text-3xl font-semibold tracking-tight tabular-nums text-[#5ab253]">
-                    {formatPesos(0)}
-                  </p>
+                  <div
+                    suppressHydrationWarning={true}
+                    className="mt-4 text-3xl font-semibold tracking-tight tabular-nums text-[#5ab253]"
+                  >
+                    {isLoadingKpis && !kpisData ? (
+                      <Skeleton className="h-9 w-28 bg-zinc-800" />
+                    ) : (
+                      formatPesos(kpisData?.ingresos ?? 0)
+                    )}
+                  </div>
                 </div>
                 <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-[#5ab253]/35 bg-[#5ab253]/12 p-2.5">
                   <TrendingUp className="size-5 text-[#5ab253]" aria-hidden />
@@ -99,9 +192,16 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <p className={KPI_TITLE_CLASS}>Egresos</p>
-                  <p className="mt-4 text-3xl font-semibold tracking-tight tabular-nums text-[#e41b68]">
-                    {formatPesos(0)}
-                  </p>
+                  <div
+                    suppressHydrationWarning={true}
+                    className="mt-4 text-3xl font-semibold tracking-tight tabular-nums text-[#e41b68]"
+                  >
+                    {isLoadingKpis && !kpisData ? (
+                      <Skeleton className="h-9 w-28 bg-zinc-800" />
+                    ) : (
+                      formatPesos(kpisData?.egresos ?? 0)
+                    )}
+                  </div>
                 </div>
                 <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-[#e41b68]/35 bg-[#e41b68]/12 p-2.5">
                   <TrendingDown className="size-5 text-[#e41b68]" aria-hidden />
@@ -112,8 +212,33 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <p className={KPI_TITLE_CLASS}>Próxima clase</p>
-                  <p className="mt-2 text-lg font-semibold text-zinc-100">—</p>
-                  <p className="mt-1 text-sm text-zinc-400">Sin datos suficientes</p>
+                  {isLoadingKpis && !kpisData ? (
+                    <div className="mt-2 space-y-2">
+                      <Skeleton className="h-6 w-44 bg-zinc-800" />
+                      <Skeleton className="h-4 w-36 bg-zinc-800" />
+                    </div>
+                  ) : kpisData?.proximaClase ? (
+                    <>
+                      <p className="mt-2 text-lg font-semibold text-zinc-100">
+                        {kpisData.proximaClase.nombre}
+                      </p>
+                      <p className="mt-1 text-sm text-zinc-400">
+                        {new Date(kpisData.proximaClase.fechaHora).toLocaleString("es-AR", {
+                          weekday: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                        {kpisData.proximaClase.instructor
+                          ? ` · ${kpisData.proximaClase.instructor}`
+                          : ""}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mt-2 text-lg font-semibold text-zinc-100">—</p>
+                      <p className="mt-1 text-sm text-zinc-400">Sin datos suficientes</p>
+                    </>
+                  )}
                 </div>
                 <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-[#e41b68]/35 bg-[#e41b68]/12 p-2.5">
                   <Calendar className="size-5 text-[#e41b68]" aria-hidden />
@@ -145,7 +270,16 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {proximosVencimientos.length === 0 ? (
+                  {isLoadingVencimientos && proximosVencimientos.length === 0 ? (
+                    [...Array.from({ length: 3 })].map((_, idx) => (
+                      <tr key={`sk-venc-${idx}`}>
+                        <td className="px-3 py-3"><Skeleton className="h-4 w-24 bg-zinc-800" /></td>
+                        <td className="px-3 py-3"><Skeleton className="h-4 w-32 bg-zinc-800" /></td>
+                        <td className="px-3 py-3 text-right"><Skeleton className="ml-auto h-4 w-20 bg-zinc-800" /></td>
+                        <td className="px-3 py-3 text-right"><Skeleton className="ml-auto h-4 w-20 bg-zinc-800" /></td>
+                      </tr>
+                    ))
+                  ) : proximosVencimientos.length === 0 ? (
                     <tr>
                       <td
                         colSpan={4}
@@ -157,7 +291,7 @@ export default function DashboardPage() {
                   ) : (
                     proximosVencimientos.map((item) => (
                       <tr
-                        key={`${item.concepto}-${item.descripcion}`}
+                        key={item.id}
                         className="border-b border-zinc-800/40 last:border-b-0"
                       >
                         <td className="px-3 py-2 text-zinc-100">{item.concepto}</td>
@@ -165,7 +299,11 @@ export default function DashboardPage() {
                         <td className="px-3 py-2 text-right font-semibold text-zinc-100">
                           {formatPesos(item.total)}
                         </td>
-                        <td className="px-3 py-2 text-right text-zinc-400">{item.fecha}</td>
+                        <td className="px-3 py-2 text-right text-zinc-400">
+                          {item.fecha
+                            ? new Date(`${item.fecha}T00:00:00`).toLocaleDateString("es-AR")
+                            : "—"}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -182,7 +320,7 @@ export default function DashboardPage() {
                 Comparativa de los últimos 6 meses
               </p>
               <div className="mt-4 h-[300px] w-full min-w-0 sm:h-[320px]">
-                {chartReady && tieneDatosGrafico ? (
+                {tieneDatosGrafico ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart
                       data={[...chartData]}
@@ -194,7 +332,7 @@ export default function DashboardPage() {
                         vertical={false}
                       />
                       <XAxis
-                        dataKey="mes"
+                        dataKey="name"
                         tick={{
                           fill: "hsl(215 20% 72%)",
                           fontSize: 12,
@@ -276,12 +414,12 @@ export default function DashboardPage() {
                       />
                     </BarChart>
                   </ResponsiveContainer>
-                ) : !chartReady ? (
+                ) : isLoadingChart ? (
                   <div
                     className="flex h-full items-center justify-center rounded-xl border border-dashed border-white/10 bg-black/20 text-sm text-foreground/50"
                     aria-hidden
                   >
-                    Preparando gráfico…
+                    <Skeleton className="h-[220px] w-full bg-zinc-800" />
                   </div>
                 ) : (
                   <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-white/10 bg-black/20 px-4 text-center text-sm text-foreground/50">
@@ -298,13 +436,22 @@ export default function DashboardPage() {
               </p>
               <ul className="mt-4 space-y-2">
                 {movimientos.length === 0 ? (
-                  <li className="rounded-xl border border-dashed border-white/10 bg-black/10 px-3 py-6 text-center text-sm text-foreground/50">
-                    Sin datos suficientes
-                  </li>
+                  isLoadingMovimientos ? (
+                    [...Array.from({ length: 3 })].map((_, idx) => (
+                      <li key={`sk-mov-${idx}`} className="rounded-xl border border-white/10 bg-black/15 px-3 py-3">
+                        <Skeleton className="h-4 w-28 bg-zinc-800" />
+                        <Skeleton className="mt-2 h-4 w-44 bg-zinc-800" />
+                      </li>
+                    ))
+                  ) : (
+                    <li className="rounded-xl border border-dashed border-white/10 bg-black/10 px-3 py-6 text-center text-sm text-foreground/50">
+                      Sin datos suficientes
+                    </li>
+                  )
                 ) : (
                   movimientos.map((mov) => (
                     <li
-                      key={`${mov.monto}-${mov.detalle}`}
+                      key={mov.id}
                       className="rounded-xl border border-white/10 bg-black/15 px-3 py-3 text-sm"
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -321,7 +468,14 @@ export default function DashboardPage() {
                             mov.positive ? "text-[#5ab253]" : "text-[#e41b68]"
                           }`}
                         >
-                          {mov.monto}
+                          <span className="inline-flex items-center gap-1">
+                            {mov.positive ? (
+                              <ArrowUpRight className="size-4" aria-hidden />
+                            ) : (
+                              <ArrowDownLeft className="size-4" aria-hidden />
+                            )}
+                            {formatPesos(mov.monto)}
+                          </span>
                         </p>
                       </div>
                     </li>

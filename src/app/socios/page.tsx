@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { type FormEvent, type MouseEvent, useEffect, useMemo, useState, useTransition } from "react";
+import useSWR from "swr";
 import { AlertTriangle, Filter, Plus, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,31 +43,43 @@ import {
 import { Alert, AlertTitle } from "@/components/ui/alert";
 import { SectionHeading } from "@/components/SectionHeading";
 import { PremiumDialogTitle, PremiumSheetTitle } from "@/components/PremiumTitle";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PAGE_TITLE_CLASS } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import { registrarSocioAction } from "@/actions/socios";
+import {
+  registrarSocioAction,
+  toggleEstadoSocioAction,
+  updateSocioAction,
+} from "@/actions/socios";
+import { crearMovimientoCajaAction } from "@/actions/caja";
 
 type Role = "administracion" | "socio";
 
 type MembresiaEstado =
-  | "Al día"
-  | "Vencida"
-  | "Inactivo"
-  | "Dado de baja";
+  | "Activo"
+  | "Vencido"
+  | "Inactivo";
 
 function esMoroso(estado: MembresiaEstado) {
-  return estado === "Vencida";
+  return estado === "Vencido";
 }
 
-type FormaPagoPreferida =
-  | "Efectivo"
-  | "Transferencia"
-  | "Débito Automático"
-  | "Tarjeta de Crédito";
+function toTitleCase(str: string) {
+  return str
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
 
 type Socio = {
+  socioId: string;
+  perfilId: string;
+  planId: string;
+  instructorId: string;
   vendedor: string;
   mesUltimoAumento: string;
   nombre: string;
@@ -85,7 +98,7 @@ type Socio = {
       planes: Array<{ nombre: string; monto: number; esAumento?: boolean }>;
     }
   >;
-  formaPagoPreferida: FormaPagoPreferida;
+  formaPagoPreferida: string;
   numeroTarjeta: string;
   titular: string;
   estado: MembresiaEstado;
@@ -120,25 +133,6 @@ const MONTH_FULL_LABELS = [
   "Diciembre",
 ] as const;
 
-const PLAN_VERSION_PRICES = {
-  "Plan Full": 28000,
-  "Plan Full (A2)": 32000,
-  "Plan Full (A3)": 35000,
-  "Plan 2x Semana": 23000,
-  "Plan 2x Semana (A2)": 26000,
-  "Plan 2x Semana (A3)": 28500,
-  "Plan 3x Semana": 24000,
-  "Plan 3x Semana (A2)": 27000,
-  "Mensual Premium": 30000,
-  "Mensual Premium (A2)": 33500,
-  "Pase Libre Diario": 18000,
-} as const;
-
-type PlanVersion = keyof typeof PLAN_VERSION_PRICES;
-
-const PLAN_OPTIONS = Object.keys(PLAN_VERSION_PRICES) as PlanVersion[];
-const PLAN_FILTROS = ["Todos", ...PLAN_OPTIONS] as const;
-const INSTRUCTOR_OPTIONS = ["Juan Pérez", "Mariana Gómez", "Sin asignar"] as const;
 
 function yyyymm(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
@@ -159,6 +153,13 @@ function formatMesAnio(mesYYYYMM: string) {
     year: "numeric",
   }).format(d);
   return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function estadoVisualSocio(estadoDb: string | null | undefined): MembresiaEstado {
+  const normalized = (estadoDb ?? "").trim().toLowerCase();
+  if (normalized === "activo") return "Activo";
+  if (normalized === "vencido") return "Vencido";
+  return "Inactivo";
 }
 
 function formatPesos(value: number) {
@@ -206,10 +207,6 @@ function createHistorialMensual(plan: string, precio: number, year: number) {
   return out;
 }
 
-function priceForPlan(plan: string) {
-  return PLAN_VERSION_PRICES[plan as PlanVersion] ?? 0;
-}
-
 const SHEET_PANEL_CLASS =
   "flex h-full w-full flex-col border-l border-border bg-card text-card-foreground sm:max-w-md";
 
@@ -249,14 +246,14 @@ function parseDisplayToIso(display: string): string | null {
 }
 
 function EstadoBadge({ estado }: { estado: MembresiaEstado }) {
-  if (estado === "Inactivo" || estado === "Dado de baja") {
+  if (estado === "Inactivo") {
     return (
       <span className="inline-flex rounded-full border border-zinc-600 bg-zinc-800/80 px-2.5 py-0.5 text-xs font-semibold text-zinc-300">
         {estado}
       </span>
     );
   }
-  if (estado === "Vencida") {
+  if (estado === "Vencido") {
     return (
       <span
         className={cn(
@@ -264,11 +261,11 @@ function EstadoBadge({ estado }: { estado: MembresiaEstado }) {
         )}
       >
         <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
-        VENCIDA
+        VENCIDO
       </span>
     );
   }
-  const isOk = estado === "Al día";
+  const isOk = estado === "Activo";
   return (
     <span
       className={cn(
@@ -284,22 +281,25 @@ function EstadoBadge({ estado }: { estado: MembresiaEstado }) {
 }
 
 type FiltroEstado = {
-  alDia: boolean;
+  activo: boolean;
   vencida: boolean;
   inactivo: boolean;
-  dadoDeBaja: boolean;
 };
 
 const filtroEstadoVacio: FiltroEstado = {
-  alDia: false,
+  activo: false,
   vencida: false,
   inactivo: false,
-  dadoDeBaja: false,
+};
+
+const filtroEstadoDefault: FiltroEstado = {
+  activo: true,
+  vencida: true,
+  inactivo: false,
 };
 
 type NuevoSocioForm = {
-  vendedor: string;
-  mesUltimoAumento: string;
+  instructorId: string;
   nombre: string;
   dni: string;
   celular: string;
@@ -309,26 +309,24 @@ type NuevoSocioForm = {
   plan: string;
   planId: string;
   precioActual: string;
-  formaPagoPreferida: FormaPagoPreferida;
+  formaPagoId: string;
   numeroTarjeta: string;
   titular: string;
 };
 
 function formularioNuevoVacio(): NuevoSocioForm {
-  const defaultPlan: PlanVersion = "Mensual Premium";
   return {
-    vendedor: "Sin asignar",
-    mesUltimoAumento: yyyymm(new Date()),
+    instructorId: "",
     nombre: "",
     dni: "",
     celular: "",
     domicilio: "",
     provincia: "",
     correo: "",
-    plan: defaultPlan,
+    plan: "",
     planId: "",
-    precioActual: String(priceForPlan(defaultPlan)),
-    formaPagoPreferida: "Efectivo",
+    precioActual: "0",
+    formaPagoId: "",
     numeroTarjeta: "",
     titular: "",
   };
@@ -342,6 +340,17 @@ type PlanOption = {
   estado: string | null;
 };
 
+type InstructorOption = { id: string; nombre: string };
+type FormaPagoOption = { id: string; nombre: string };
+type ConceptoIngresoOption = { id: string; concepto: string; descripcion: string };
+type CobroForm = {
+  conceptoId: string;
+  formaPagoId: string;
+  monto: string;
+  fecha: string;
+  observaciones: string;
+};
+
 export default function SociosPage() {
   const [role] = useState<Role>(() => {
     if (typeof window === "undefined") return "administracion";
@@ -349,11 +358,10 @@ export default function SociosPage() {
     return stored === "socio" ? "socio" : "administracion";
   });
 
-  const [socios, setSocios] = useState<Socio[]>([]);
   const [query, setQuery] = useState("");
   const [sheetOpen, setSheetOpen] = useState(false);
   const [nuevoSheetOpen, setNuevoSheetOpen] = useState(false);
-  const [selectedDni, setSelectedDni] = useState<string | null>(null);
+  const [selectedSocioId, setSelectedSocioId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Socio | null>(null);
 
   const [nuevoForm, setNuevoForm] = useState<NuevoSocioForm>(formularioNuevoVacio);
@@ -362,19 +370,185 @@ export default function SociosPage() {
   const [motivoBaja, setMotivoBaja] = useState("");
   const [isPending, startTransition] = useTransition();
   const [planesActivos, setPlanesActivos] = useState<PlanOption[]>([]);
+  const [instructoresActivos, setInstructoresActivos] = useState<InstructorOption[]>([]);
+  const [formasPagoActivas, setFormasPagoActivas] = useState<FormaPagoOption[]>([]);
+  const [conceptosIngreso, setConceptosIngreso] = useState<ConceptoIngresoOption[]>([]);
   const [adminFranquiciaId, setAdminFranquiciaId] = useState<string | null>(null);
+  const [isSavingCobro, setIsSavingCobro] = useState(false);
+  const [cobroForm, setCobroForm] = useState<CobroForm>({
+    conceptoId: "",
+    formaPagoId: "",
+    monto: "0",
+    fecha: todayIso(),
+    observaciones: "",
+  });
 
-  const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>({ ...filtroEstadoVacio });
-  const [filtroPlan, setFiltroPlan] = useState<(typeof PLAN_FILTROS)[number]>("Todos");
+  const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>({ ...filtroEstadoDefault });
+  const [filtroPlan, setFiltroPlan] = useState<string>("Todos");
   const [filtroConDeuda, setFiltroConDeuda] = useState(false);
   const [filtroARevisar, setFiltroARevisar] = useState(false);
   const [isEditingSocio, setIsEditingSocio] = useState(false);
   const [viewModeSocio, setViewModeSocio] = useState<"detalle" | "historial">("detalle");
 
-  const socioDetail = useMemo(
-    () => socios.find((s) => s.dni === selectedDni) ?? null,
-    [socios, selectedDni]
+  const { data: adminCatalogData, error: catalogError, mutate: mutateCatalogos } = useSWR(
+    "socios-catalogos",
+    async () => {
+      const supabase = createSupabaseClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return null;
+      const { data: perfil, error: perfilError } = await supabase
+        .from("perfiles")
+        .select("franquicia_id")
+        .eq("id", user.id)
+        .single();
+      if (perfilError || !perfil?.franquicia_id) return null;
+
+      const [{ data: planes }, { data: instructores }, { data: formas }, { data: conceptos }] =
+        await Promise.all([
+          supabase
+            .from("planes")
+            .select("id,nombre,precio,franquicia_id,estado")
+            .eq("franquicia_id", perfil.franquicia_id)
+            .eq("estado", "activo")
+            .order("nombre", { ascending: true }),
+          supabase
+            .from("instructores")
+            .select("id,nombre")
+            .eq("franquicia_id", perfil.franquicia_id)
+            .eq("estado", "activo")
+            .order("nombre", { ascending: true }),
+          supabase
+            .from("formas_pago")
+            .select("id,nombre")
+            .eq("franquicia_id", perfil.franquicia_id)
+            .eq("activo", true)
+            .order("nombre", { ascending: true }),
+          supabase
+            .from("conceptos_caja")
+            .select("id,concepto,descripcion")
+            .eq("franquicia_id", perfil.franquicia_id)
+            .eq("tipo", "ingreso")
+            .order("concepto", { ascending: true }),
+        ]);
+
+      return {
+        franquiciaId: perfil.franquicia_id,
+        planes: (planes ?? []) as PlanOption[],
+        instructores: (instructores ?? []) as InstructorOption[],
+        formas: (formas ?? []) as FormaPagoOption[],
+        conceptos: (conceptos ?? []) as ConceptoIngresoOption[],
+      };
+    },
+    { revalidateOnFocus: false, keepPreviousData: true },
   );
+
+  const { data: sociosData, isLoading: isLoadingSocios, error: sociosError, mutate: mutateSocios } = useSWR(
+    adminCatalogData?.franquiciaId
+      ? [
+          "socios-lista-v2-order-by-perfiles-nombre",
+          adminCatalogData.franquiciaId,
+          filtroEstado.activo,
+          filtroEstado.vencida,
+          filtroEstado.inactivo,
+        ]
+      : null,
+    async () => {
+      const supabase = createSupabaseClient();
+      const franquiciaId = adminCatalogData!.franquiciaId;
+      const estadosSeleccionados: string[] = [];
+      if (filtroEstado.activo) estadosSeleccionados.push("activo");
+      if (filtroEstado.vencida) estadosSeleccionados.push("vencido");
+      if (filtroEstado.inactivo) estadosSeleccionados.push("inactivo");
+      let query = supabase
+        .from("socios")
+        .select(
+          "id,perfil_id,plan_id,instructor_id,dni,domicilio,provincia,telefono,mes_ultimo_aumento,estado,perfil:perfiles(nombre,email),plan:planes(nombre,precio),instructor:instructores(nombre)",
+        )
+        .eq("franquicia_id", franquiciaId);
+      if (estadosSeleccionados.length > 0) {
+        query = query.in("estado", estadosSeleccionados);
+      }
+      const { data: rows } = await query.order("nombre", {
+        ascending: true,
+        foreignTable: "perfiles",
+      });
+
+      type SocioRow = {
+        id: string;
+        perfil_id: string | null;
+        plan_id: string | null;
+        instructor_id: string | null;
+        dni: string | null;
+        domicilio: string | null;
+        provincia: string | null;
+        telefono: string | null;
+        mes_ultimo_aumento: string | null;
+        estado: string | null;
+        perfil?: { nombre?: string | null; email?: string | null } | null;
+        plan?: { nombre?: string | null; precio?: number | null } | null;
+        instructor?: { nombre?: string | null } | null;
+      };
+
+      return ((rows ?? []) as SocioRow[])
+        .map((row) => {
+        const planLabel = row.plan?.nombre ?? "Sin plan";
+        const precio = Number(row.plan?.precio ?? 0);
+        return {
+          socioId: row.id,
+          perfilId: row.perfil_id ?? "",
+          planId: row.plan_id ?? "",
+          instructorId: row.instructor_id ?? "",
+          vendedor: row.instructor?.nombre ?? "Sin asignar",
+          mesUltimoAumento: row.mes_ultimo_aumento ?? yyyymm(new Date()),
+          nombre: row.perfil?.nombre ?? "Sin nombre",
+          dni: row.dni ?? row.id,
+          celular: row.telefono ?? "—",
+          domicilio: row.domicilio ?? "—",
+          provincia: row.provincia ?? "—",
+          correo: row.perfil?.email ?? "—",
+          plan: planLabel,
+          precioActual: precio,
+          historialPrecios: createHistorialAnual(precio, new Date().getFullYear()),
+          historialPlanes: createHistorialPlanes(planLabel, new Date().getFullYear()),
+          historialMensual: createHistorialMensual(planLabel, precio, new Date().getFullYear()),
+          formaPagoPreferida: "Efectivo",
+          numeroTarjeta: "",
+          titular: row.perfil?.nombre ?? "—",
+          estado: estadoVisualSocio(row.estado),
+        } satisfies Socio;
+      })
+        .sort((a, b) =>
+          a.nombre.localeCompare(b.nombre, "es", {
+            sensitivity: "base",
+            ignorePunctuation: true,
+          }),
+        );
+    },
+    { revalidateOnFocus: false, keepPreviousData: true },
+  );
+  const socios = sociosData ?? [];
+
+  const socioDetail = useMemo(
+    () => socios.find((s) => s.socioId === selectedSocioId) ?? null,
+    [socios, selectedSocioId]
+  );
+
+  useEffect(() => {
+    if (!socioDetail) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCobroForm((prev) => ({
+      ...prev,
+      conceptoId: prev.conceptoId || conceptosIngreso[0]?.id || "",
+      formaPagoId: prev.formaPagoId || formasPagoActivas[0]?.id || "",
+      monto:
+        prev.monto !== "0" && prev.monto !== ""
+          ? prev.monto
+          : String(socioDetail.precioActual || 0),
+      fecha: todayIso(),
+    }));
+  }, [socioDetail, conceptosIngreso, formasPagoActivas]);
 
   const hayFiltroEstadoActivo = useMemo(
     () => Object.values(filtroEstado).some(Boolean),
@@ -389,112 +563,44 @@ export default function SociosPage() {
   const socioRequiereRevision = (socio: Socio) =>
     monthDiff(socio.mesUltimoAumento, new Date()) >= 3;
 
-  useEffect(() => {
-    const loadAdminContextAndPlanes = async () => {
-      try {
-        const supabase = createSupabaseClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) return;
-
-        const { data: perfil, error: perfilError } = await supabase
-          .from("perfiles")
-          .select("franquicia_id")
-          .eq("id", user.id)
-          .single();
-
-        if (perfilError || !perfil?.franquicia_id) return;
-        setAdminFranquiciaId(perfil.franquicia_id);
-
-        const { data: planes, error: planesError } = await supabase
-          .from("planes")
-          .select("id,nombre,precio,franquicia_id,estado")
-          .eq("franquicia_id", perfil.franquicia_id)
-          .eq("estado", "activo")
-          .order("nombre", { ascending: true });
-
-        if (!planesError && planes) {
-          setPlanesActivos(planes as PlanOption[]);
-          setNuevoForm((f) => {
-            if (f.planId || planes.length === 0) return f;
-            const defaultPlan = planes[0] as PlanOption;
-            const planLabel = defaultPlan.nombre;
-            return {
-              ...f,
-              planId: defaultPlan.id,
-              plan: planLabel,
-              precioActual: String(defaultPlan.precio),
-            };
-          });
-        }
-      } catch {
-        // noop: UI can still work with local fallback.
-      }
-    };
-
-    loadAdminContextAndPlanes();
-  }, []);
+  const planOptionsFilter = useMemo(
+    () => ["Todos", ...new Set(socios.map((s) => s.plan))],
+    [socios],
+  );
 
   useEffect(() => {
-    const loadSocios = async () => {
-      try {
-        const supabase = createSupabaseClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) return;
+    if (!adminCatalogData) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAdminFranquiciaId(adminCatalogData.franquiciaId);
+    setPlanesActivos(adminCatalogData.planes);
+    setInstructoresActivos(adminCatalogData.instructores);
+    setFormasPagoActivas(adminCatalogData.formas);
+    setConceptosIngreso(adminCatalogData.conceptos);
+    setNuevoForm((f) => {
+      const defaultPlan = adminCatalogData.planes[0];
+      const defaultInstructor = adminCatalogData.instructores[0];
+      const defaultFormaPago = adminCatalogData.formas[0];
+      return {
+        ...f,
+        planId: f.planId || defaultPlan?.id || "",
+        plan: f.plan || defaultPlan?.nombre || "",
+        precioActual:
+          f.precioActual !== "0" ? f.precioActual : String(defaultPlan?.precio ?? 0),
+        instructorId: f.instructorId || defaultInstructor?.id || "",
+        formaPagoId: f.formaPagoId || defaultFormaPago?.id || "",
+      };
+    });
+    setCobroForm((prev) => ({
+      ...prev,
+      conceptoId: prev.conceptoId || adminCatalogData.conceptos[0]?.id || "",
+      formaPagoId: prev.formaPagoId || adminCatalogData.formas[0]?.id || "",
+    }));
+  }, [adminCatalogData]);
 
-        const { data: perfilAdmin } = await supabase
-          .from("perfiles")
-          .select("franquicia_id")
-          .eq("id", user.id)
-          .single();
-
-        if (!perfilAdmin?.franquicia_id) return;
-
-        const { data: rows } = await supabase
-          .from("socios")
-          .select(
-            "id,telefono,mes_ultimo_aumento,estado,perfil:perfiles(nombre,email),plan:planes(nombre,version,precio)",
-          )
-          .eq("franquicia_id", perfilAdmin.franquicia_id);
-
-        const loaded = (rows ?? []).map((row: any) => {
-          const planLabel = row.plan?.version
-            ? `${row.plan.nombre} (${row.plan.version})`
-            : (row.plan?.nombre ?? "Sin plan");
-          const precio = Number(row.plan?.precio ?? 0);
-          return {
-            vendedor: "Sin asignar",
-            mesUltimoAumento: row.mes_ultimo_aumento ?? yyyymm(new Date()),
-            nombre: row.perfil?.nombre ?? "Sin nombre",
-            dni: row.id,
-            celular: row.telefono ?? "—",
-            domicilio: "—",
-            provincia: "—",
-            correo: row.perfil?.email ?? "—",
-            plan: planLabel,
-            precioActual: precio,
-            historialPrecios: createHistorialAnual(precio, new Date().getFullYear()),
-            historialPlanes: createHistorialPlanes(planLabel, new Date().getFullYear()),
-            historialMensual: createHistorialMensual(planLabel, precio, new Date().getFullYear()),
-            formaPagoPreferida: "Efectivo" as FormaPagoPreferida,
-            numeroTarjeta: "",
-            titular: row.perfil?.nombre ?? "—",
-            estado:
-              row.estado === "activo"
-                ? ("Al día" as MembresiaEstado)
-                : ("Inactivo" as MembresiaEstado),
-          } satisfies Socio;
-        });
-        setSocios(loaded);
-      } catch {
-        setSocios([]);
-      }
-    };
-    loadSocios();
-  }, []);
+  useEffect(() => {
+    if (!adminCatalogData?.franquiciaId) return;
+    void mutateSocios();
+  }, [adminCatalogData?.franquiciaId, mutateSocios]);
 
   const filtrados = useMemo(() => {
     let list = socios;
@@ -524,10 +630,9 @@ export default function SociosPage() {
       list = list.filter((s) => socioRequiereRevision(s));
     } else if (hayFiltroEstadoActivo) {
       list = list.filter((s) => {
-        if (filtroEstado.alDia && s.estado === "Al día") return true;
-        if (filtroEstado.vencida && s.estado === "Vencida") return true;
+        if (filtroEstado.activo && s.estado === "Activo") return true;
+        if (filtroEstado.vencida && s.estado === "Vencido") return true;
         if (filtroEstado.inactivo && s.estado === "Inactivo") return true;
-        if (filtroEstado.dadoDeBaja && s.estado === "Dado de baja") return true;
         return false;
       });
     }
@@ -549,7 +654,7 @@ export default function SociosPage() {
 
   const abrirDetalle = (socio: Socio) => {
     setNuevoSheetOpen(false);
-    setSelectedDni(socio.dni);
+    setSelectedSocioId(socio.socioId);
     setDraft({ ...socio });
     setIsEditingSocio(false);
     setViewModeSocio("detalle");
@@ -558,7 +663,7 @@ export default function SociosPage() {
 
   const cerrarSheet = () => {
     setSheetOpen(false);
-    setSelectedDni(null);
+    setSelectedSocioId(null);
     setDraft(null);
     setIsEditingSocio(false);
     setViewModeSocio("detalle");
@@ -575,55 +680,62 @@ export default function SociosPage() {
     setNuevoForm(formularioNuevoVacio());
   };
 
-  const guardarEdicion = () => {
-    if (!draft || !selectedDni) return;
-    const hoyMes = yyyymm(new Date());
-    setSocios((prev) =>
-      prev.map((s) => {
-        if (s.dni !== selectedDni) return s;
-        const planActualizado = draft.plan;
-        const precioDelPlan = priceForPlan(planActualizado);
-        const changedPlan = s.plan !== planActualizado;
-        const next = {
-          ...draft,
-          precioActual: precioDelPlan,
-          historialPrecios: { ...s.historialPrecios },
-          historialPlanes: { ...s.historialPlanes },
-          historialMensual: { ...s.historialMensual },
-        };
-        next.historialPrecios[hoyMes] = precioDelPlan;
-        next.historialPlanes[hoyMes] = planActualizado;
-        next.historialMensual[hoyMes] = {
-          planes: [
-            {
-              nombre: planActualizado,
-              monto: precioDelPlan,
-              esAumento: changedPlan,
-            },
-          ],
-        };
-        if (changedPlan) {
-          next.mesUltimoAumento = hoyMes;
-        }
-        return next;
-      })
+  const guardarEdicion = async () => {
+    if (!draft || !selectedSocioId || !adminFranquiciaId) {
+      toast.error("No se pudo identificar el socio a editar");
+      return;
+    }
+    const selectedPlan = planesActivos.find((p) => p.nombre === draft.plan);
+    const selectedInstructor = instructoresActivos.find(
+      (i) => i.nombre === draft.vendedor,
     );
-    const changedPlan = socioDetail ? socioDetail.plan !== draft.plan : false;
-    setDraft((prev) =>
-      prev
-        ? {
-            ...prev,
-            precioActual: priceForPlan(prev.plan),
-            mesUltimoAumento: changedPlan ? hoyMes : prev.mesUltimoAumento,
-          }
-        : prev
-    );
-    toast.success(
-      changedPlan
-        ? "Plan actualizado y aumento registrado"
-        : "Información guardada correctamente"
-    );
-    setIsEditingSocio(false);
+    if (
+      !selectedPlan ||
+      !selectedInstructor ||
+      !draft.dni.trim() ||
+      !draft.nombre.trim() ||
+      !draft.correo.trim()
+    ) {
+      toast.error("Revisa los campos del formulario");
+      return;
+    }
+    const payload = {
+      socioId: draft.socioId,
+      perfilId: draft.perfilId,
+      franquiciaId: adminFranquiciaId,
+      planId: selectedPlan.id,
+      instructorId: selectedInstructor.id,
+      dni: draft.dni.trim(),
+      domicilio: toTitleCase(draft.domicilio.trim()),
+      provincia: toTitleCase(draft.provincia.trim()),
+      telefono: draft.celular.trim() || null,
+      nombre: toTitleCase(draft.nombre.trim()),
+      email: draft.correo.trim(),
+    };
+    try {
+      const result = await updateSocioAction(payload);
+      if (!result.ok) {
+        toast.error(result.error ?? "No se pudieron guardar los cambios");
+        return;
+      }
+
+      toast.success("Datos actualizados correctamente");
+      setIsEditingSocio(false);
+      await mutateSocios();
+    } catch {
+      toast.error("No se pudieron guardar los cambios");
+    }
+  };
+
+  const onSubmitEdicion = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    await guardarEdicion();
+  };
+
+  const onStartEditing = (e: MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsEditingSocio(true);
   };
 
   const guardarNuevoSocio = () => {
@@ -632,18 +744,23 @@ export default function SociosPage() {
       !nuevoForm.dni.trim() ||
       !nuevoForm.correo.trim() ||
       !nuevoForm.planId ||
+      !nuevoForm.instructorId ||
+      !nuevoForm.formaPagoId ||
       !adminFranquiciaId
     ) {
-      toast.error("Completá nombre, email, DNI y plan para registrar el socio");
+      toast.error("Completá nombre, email, DNI, instructor, plan y forma de pago");
       return;
     }
 
     startTransition(async () => {
       const result = await registrarSocioAction({
-        nombre: nuevoForm.nombre.trim(),
+        nombre: toTitleCase(nuevoForm.nombre.trim()),
         email: nuevoForm.correo.trim(),
         telefono: nuevoForm.celular.trim() || null,
         dni: nuevoForm.dni.trim(),
+        domicilio: toTitleCase(nuevoForm.domicilio.trim()) || "",
+        provincia: toTitleCase(nuevoForm.provincia.trim()) || "",
+        instructorId: nuevoForm.instructorId,
         planId: nuevoForm.planId,
         franquiciaId: adminFranquiciaId,
       });
@@ -653,73 +770,96 @@ export default function SociosPage() {
         return;
       }
 
-      const selectedPlan = planesActivos.find((p) => p.id === nuevoForm.planId);
-      const planLabel = selectedPlan
-        ? selectedPlan.nombre
-        : nuevoForm.plan;
-      const precioActual =
-        selectedPlan?.precio ?? (Number(nuevoForm.precioActual) || 0);
-      const [year] = nuevoForm.mesUltimoAumento.split("-").map(Number);
-
-      const nuevo: Socio = {
-        vendedor: nuevoForm.vendedor.trim() || "Sin asignar",
-        mesUltimoAumento: nuevoForm.mesUltimoAumento || yyyymm(new Date()),
-        nombre: nuevoForm.nombre.trim(),
-        dni: nuevoForm.dni.trim(),
-        celular: nuevoForm.celular.trim() || "—",
-        domicilio: nuevoForm.domicilio.trim() || "—",
-        provincia: nuevoForm.provincia.trim() || "—",
-        correo: nuevoForm.correo.trim() || "—",
-        plan: planLabel,
-        precioActual,
-        historialPrecios: createHistorialAnual(
-          precioActual,
-          year || new Date().getFullYear(),
-        ),
-        historialPlanes: createHistorialPlanes(
-          planLabel,
-          year || new Date().getFullYear(),
-        ),
-        historialMensual: createHistorialMensual(
-          planLabel,
-          precioActual,
-          year || new Date().getFullYear(),
-        ),
-        formaPagoPreferida: nuevoForm.formaPagoPreferida,
-        numeroTarjeta: nuevoForm.numeroTarjeta.trim(),
-        titular: nuevoForm.titular.trim() || nuevoForm.nombre.trim(),
-        estado: "Al día",
-      };
-
-      setSocios((prev) => [...prev, nuevo]);
       cerrarNuevoSheet();
       toast.success("Socio registrado correctamente");
+      await mutateSocios();
+      await mutateCatalogos();
     });
   };
 
-  const confirmarBaja = () => {
-    if (!selectedDni || !motivoBaja.trim()) return;
-    setSocios((prev) =>
-      prev.map((s) =>
-        s.dni === selectedDni ? { ...s, estado: "Dado de baja" as MembresiaEstado } : s
-      )
-    );
+  const registrarCobro = async () => {
+    if (!selectedSocioId || !adminFranquiciaId) {
+      toast.error("No se pudo identificar el socio");
+      return;
+    }
+    if (!cobroForm.conceptoId || !cobroForm.formaPagoId) {
+      toast.error("Seleccioná concepto y forma de pago");
+      return;
+    }
+    const monto = Number(cobroForm.monto);
+    if (!Number.isFinite(monto) || monto <= 0) {
+      toast.error("Ingresá un monto válido");
+      return;
+    }
+    setIsSavingCobro(true);
+    try {
+      const supabase = createSupabaseClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user?.id) {
+        toast.error("No se pudo identificar el usuario actual");
+        return;
+      }
+      const result = await crearMovimientoCajaAction({
+        userId: user.id,
+        tipo: "ingreso",
+        monto,
+        conceptoId: cobroForm.conceptoId,
+        formaPagoId: cobroForm.formaPagoId,
+        socioId: selectedSocioId,
+        fecha: cobroForm.fecha || todayIso(),
+        observaciones: cobroForm.observaciones.trim() || null,
+      });
+      if (!result.ok) {
+        toast.error(result.error || "No se pudo registrar el cobro");
+        return;
+      }
+      if (result.warning) {
+        toast.error(result.warning);
+      }
+      setDraft((prev) => (prev ? { ...prev, estado: "Activo" as MembresiaEstado } : prev));
+      setCobroForm((prev) => ({
+        ...prev,
+        monto: String(vista?.precioActual ?? 0),
+        fecha: todayIso(),
+        observaciones: "",
+      }));
+      toast.success("Cobro registrado correctamente");
+      await mutateSocios();
+    } finally {
+      setIsSavingCobro(false);
+    }
+  };
+
+  const confirmarBaja = async () => {
+    if (!selectedSocioId || !motivoBaja.trim()) return;
+    const result = await toggleEstadoSocioAction({
+      socioId: selectedSocioId,
+      nuevoEstado: "inactivo",
+    });
+    if (!result.ok) {
+      toast.error(result.error || "No se pudo dar de baja el socio");
+      return;
+    }
+    await mutateSocios();
     setBajaOpen(false);
     setMotivoBaja("");
     cerrarSheet();
     toast.success("Socio dado de baja correctamente");
   };
 
-  const reactivarSocio = () => {
-    if (!selectedDni) return;
-    setSocios((prev) =>
-      prev.map((s) =>
-        s.dni === selectedDni ? { ...s, estado: "Al día" as MembresiaEstado } : s
-      )
-    );
-    setDraft((prev) =>
-      prev ? { ...prev, estado: "Al día" as MembresiaEstado } : prev
-    );
+  const reactivarSocio = async () => {
+    if (!selectedSocioId) return;
+    const result = await toggleEstadoSocioAction({
+      socioId: selectedSocioId,
+      nuevoEstado: "activo",
+    });
+    if (!result.ok) {
+      toast.error(result.error || "No se pudo reactivar el socio");
+      return;
+    }
+    await mutateSocios();
     toast.success("Socio reactivado correctamente");
   };
 
@@ -754,8 +894,7 @@ export default function SociosPage() {
 
   const vista = draft ?? socioDetail;
 
-  const socioInactivo =
-    vista?.estado === "Inactivo" || vista?.estado === "Dado de baja";
+  const socioInactivo = vista?.estado === "Inactivo";
   const consolidadoYear = new Date().getFullYear();
   const currentMonthIndex = new Date().getMonth() + 1;
   const consolidadoMeses = MONTH_LABELS.map(
@@ -797,6 +936,11 @@ export default function SociosPage() {
       </div>
 
       <div className="mt-6 space-y-3">
+        {catalogError || sociosError ? (
+          <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            No se pudieron cargar los datos de socios.
+          </div>
+        ) : null}
         <div className="rounded-2xl border border-zinc-800/50 bg-card p-4 md:p-5">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <Input
@@ -822,10 +966,9 @@ export default function SociosPage() {
                 <div className="flex flex-col gap-2">
                   {(
                     [
-                      ["alDia", "Al día"],
-                      ["vencida", "Vencida"],
+                      ["activo", "Activo"],
+                      ["vencida", "Vencido"],
                       ["inactivo", "Inactivo"],
-                      ["dadoDeBaja", "Dado de baja"],
                     ] as const
                   ).map(([key, label]) => (
                     <label
@@ -858,16 +1001,14 @@ export default function SociosPage() {
                   value={filtroPlan}
                   onChange={(e) => {
                     setFiltroConDeuda(false);
-                    setFiltroPlan(
-                      e.target.value as (typeof PLAN_FILTROS)[number],
-                    );
+                    setFiltroPlan(e.target.value);
                   }}
                   className={cn(
                     "mt-2 h-10 w-full rounded-lg border px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
                     inputPanelClass
                   )}
                 >
-                  {PLAN_FILTROS.map((p) => (
+                  {planOptionsFilter.map((p) => (
                     <option key={p} value={p}>
                       {p}
                     </option>
@@ -948,13 +1089,31 @@ export default function SociosPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtrados.map((socio) => (
+            {isLoadingSocios && !sociosData ? (
+              Array.from({ length: 4 }).map((_, idx) => (
+                <TableRow key={`socios-skeleton-${idx}`} className="border-zinc-800/50">
+                  <TableCell><Skeleton className="h-4 w-36 bg-zinc-800" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-24 bg-zinc-800" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-28 bg-zinc-800" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-20 bg-zinc-800" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-28 bg-zinc-800" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-20 bg-zinc-800" /></TableCell>
+                </TableRow>
+              ))
+            ) : filtrados.map((socio) => (
               <TableRow
-                key={socio.dni}
-                onClick={() => abrirDetalle(socio)}
-                className="cursor-pointer border-zinc-800/50 hover:bg-zinc-900/40"
+                key={socio.socioId}
+                className="border-zinc-800/50 hover:bg-zinc-900/40"
               >
-                <TableCell className="font-medium">{socio.nombre}</TableCell>
+                <TableCell className="font-medium">
+                  <button
+                    type="button"
+                    onClick={() => abrirDetalle(socio)}
+                    className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                  >
+                    {socio.nombre}
+                  </button>
+                </TableCell>
                 <TableCell className="text-foreground/85">{socio.dni}</TableCell>
                 <TableCell className="text-foreground/85">{socio.plan}</TableCell>
                 <TableCell className="font-semibold text-zinc-100">
@@ -987,7 +1146,7 @@ export default function SociosPage() {
             </Table>
           </div>
         </div>
-        {filtrados.length === 0 ? (
+        {!isLoadingSocios && filtrados.length === 0 ? (
           <p className="px-2 py-4 text-center text-sm text-zinc-500">
             No hay registros disponibles. Comienza agregando uno nuevo.
           </p>
@@ -1009,36 +1168,29 @@ export default function SociosPage() {
                   Instructor
                 </Label>
                 <Select
-                  value={nuevoForm.vendedor}
+                  value={nuevoForm.instructorId}
                   onValueChange={(value) =>
-                    setNuevoForm((f) => ({ ...f, vendedor: value }))
+                    setNuevoForm((f) => ({ ...f, instructorId: value }))
                   }
+                  disabled={instructoresActivos.length === 0}
                 >
                   <SelectTrigger id="nf-vendedor" className={inputPanelClass}>
-                    <SelectValue placeholder="Seleccionar instructor" />
+                    <SelectValue
+                      placeholder={
+                        instructoresActivos.length === 0
+                          ? "Sin instructores (Crea uno en Configuración)"
+                          : "Seleccionar instructor"
+                      }
+                    />
                   </SelectTrigger>
                   <SelectContent>
-                    {INSTRUCTOR_OPTIONS.map((instructor) => (
-                      <SelectItem key={instructor} value={instructor}>
-                        {instructor}
+                    {instructoresActivos.map((instructor) => (
+                      <SelectItem key={instructor.id} value={instructor.id}>
+                        {instructor.nombre}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="nf-alta" className={LABEL_TECH}>
-                  Último aumento (mes)
-                </Label>
-                <Input
-                  id="nf-alta"
-                  type="month"
-                  value={nuevoForm.mesUltimoAumento}
-                  onChange={(e) =>
-                    setNuevoForm((f) => ({ ...f, mesUltimoAumento: e.target.value }))
-                  }
-                  className={inputPanelClass}
-                />
               </div>
               <div className="space-y-2 md:col-span-2">
                 <Label htmlFor="nf-nombre" className={LABEL_TECH}>
@@ -1135,9 +1287,16 @@ export default function SociosPage() {
                       precioActual: String(selected?.precio ?? 0),
                     }));
                   }}
+                  disabled={planesActivos.length === 0}
                 >
                   <SelectTrigger id="nf-plan" className={inputPanelClass}>
-                    <SelectValue placeholder="Seleccionar plan" />
+                    <SelectValue
+                      placeholder={
+                        planesActivos.length === 0
+                          ? "Sin planes activos (Crea uno en Configuración)"
+                          : "Seleccionar plan"
+                      }
+                    />
                   </SelectTrigger>
                   <SelectContent>
                     {planesActivos.map((plan) => (
@@ -1166,31 +1325,42 @@ export default function SociosPage() {
               <div className="space-y-2">
                 <Label className={LABEL_TECH}>Forma de pago</Label>
                 <Select
-                  value={nuevoForm.formaPagoPreferida}
-                  onValueChange={(v: FormaPagoPreferida) =>
+                  value={nuevoForm.formaPagoId}
+                  onValueChange={(v) =>
                     setNuevoForm((f) => ({
                       ...f,
-                      formaPagoPreferida: v,
+                      formaPagoId: v,
                       numeroTarjeta:
-                        v === "Débito Automático" || v === "Tarjeta de Crédito"
+                        ["Débito Automático", "Tarjeta de Crédito"].includes(
+                          formasPagoActivas.find((fp) => fp.id === v)?.nombre ?? "",
+                        )
                           ? f.numeroTarjeta
                           : "",
                     }))
                   }
+                  disabled={formasPagoActivas.length === 0}
                 >
                   <SelectTrigger className={inputPanelClass}>
-                    <SelectValue />
+                    <SelectValue
+                      placeholder={
+                        formasPagoActivas.length === 0
+                          ? "Sin formas de pago (Crea una en Configuración)"
+                          : "Seleccionar forma de pago"
+                      }
+                    />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="Efectivo">Efectivo</SelectItem>
-                    <SelectItem value="Transferencia">Transferencia</SelectItem>
-                    <SelectItem value="Débito Automático">Débito Automático</SelectItem>
-                    <SelectItem value="Tarjeta de Crédito">Tarjeta de Crédito</SelectItem>
+                    {formasPagoActivas.map((fp) => (
+                      <SelectItem key={fp.id} value={fp.id}>
+                        {fp.nombre}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
-              {nuevoForm.formaPagoPreferida === "Débito Automático" ||
-              nuevoForm.formaPagoPreferida === "Tarjeta de Crédito" ? (
+              {["Débito Automático", "Tarjeta de Crédito"].includes(
+                formasPagoActivas.find((fp) => fp.id === nuevoForm.formaPagoId)?.nombre ?? "",
+              ) ? (
                 <div className="space-y-2">
                   <Label htmlFor="nf-numero-tarjeta" className={LABEL_TECH}>
                     Número de tarjeta
@@ -1250,7 +1420,7 @@ export default function SociosPage() {
               ¿Seguro que deseas dar de baja a este socio?
             </PremiumDialogTitle>
             <DialogDescription className="text-sm text-zinc-500">
-              Escribí el motivo de la baja. Esta acción es simulada para la presentación.
+              Escribí el motivo de la baja. Esta acción actualiza el estado en la base de datos.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -1308,18 +1478,6 @@ export default function SociosPage() {
                   {vista.nombre}
                 </SheetDescription>
               </SheetHeader>
-
-              {socioInactivo ? (
-                <div className="border-b border-zinc-800 px-4 py-3">
-                  <Button
-                    type="button"
-                    className="h-10 w-full bg-secondary text-sm font-semibold text-secondary-foreground hover:bg-secondary/90"
-                    onClick={reactivarSocio}
-                  >
-                    Dar de alta nuevamente
-                  </Button>
-                </div>
-              ) : null}
 
               <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 py-4">
                 <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 pb-4">
@@ -1411,7 +1569,7 @@ export default function SociosPage() {
                     </div>
                   </section>
                 ) : (
-                  <>
+                  <form id="socio-edit-form" onSubmit={onSubmitEdicion}>
 
                 <section className="border-b border-zinc-800 pb-6">
                   <SectionHeading as="h3">Perfil</SectionHeading>
@@ -1434,12 +1592,6 @@ export default function SociosPage() {
                       )}
                     </div>
                     <div className="space-y-1.5">
-                      <Label className={LABEL_TECH}>Último aumento</Label>
-                      <p className={cn("text-sm text-zinc-200", sectionBoxClass)}>
-                        {formatMesAnio(vista.mesUltimoAumento)}
-                      </p>
-                    </div>
-                    <div className="space-y-1.5">
                       <Label className={LABEL_TECH}>Instructor</Label>
                       {draft ? (
                         <Select
@@ -1453,9 +1605,9 @@ export default function SociosPage() {
                             <SelectValue placeholder="Seleccionar instructor" />
                           </SelectTrigger>
                           <SelectContent>
-                            {INSTRUCTOR_OPTIONS.map((instructor) => (
-                              <SelectItem key={instructor} value={instructor}>
-                                {instructor}
+                            {instructoresActivos.map((instructor) => (
+                              <SelectItem key={instructor.id} value={instructor.nombre}>
+                                {instructor.nombre}
                               </SelectItem>
                             ))}
                           </SelectContent>
@@ -1532,7 +1684,9 @@ export default function SociosPage() {
                                 ? {
                                     ...d,
                                     plan: value,
-                                    precioActual: priceForPlan(value),
+                                    precioActual:
+                                      planesActivos.find((p) => p.nombre === value)?.precio ??
+                                      d.precioActual,
                                   }
                                 : d
                             )
@@ -1543,9 +1697,9 @@ export default function SociosPage() {
                             <SelectValue placeholder="Seleccionar plan" />
                           </SelectTrigger>
                           <SelectContent>
-                            {PLAN_OPTIONS.map((plan) => (
-                              <SelectItem key={plan} value={plan}>
-                                {plan}
+                            {planesActivos.map((plan) => (
+                              <SelectItem key={plan.id} value={plan.nombre}>
+                                {plan.nombre}
                               </SelectItem>
                             ))}
                           </SelectContent>
@@ -1586,7 +1740,7 @@ export default function SociosPage() {
                       {draft ? (
                         <Select
                           value={draft.formaPagoPreferida}
-                          onValueChange={(v: FormaPagoPreferida) =>
+                          onValueChange={(v) =>
                             setDraft((d) =>
                               d
                                 ? {
@@ -1606,10 +1760,11 @@ export default function SociosPage() {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="Efectivo">Efectivo</SelectItem>
-                            <SelectItem value="Transferencia">Transferencia</SelectItem>
-                            <SelectItem value="Débito Automático">Débito Automático</SelectItem>
-                            <SelectItem value="Tarjeta de Crédito">Tarjeta de Crédito</SelectItem>
+                            {formasPagoActivas.map((fp) => (
+                              <SelectItem key={fp.id} value={fp.nombre}>
+                                {fp.nombre}
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       ) : (
@@ -1660,9 +1815,121 @@ export default function SociosPage() {
                         </p>
                       )}
                     </div>
+                    <div className="space-y-1.5 md:col-span-2">
+                      <Label className={LABEL_TECH}>Registrar cobro</Label>
+                      <div className={cn("grid gap-3 rounded-lg border border-zinc-800/50 p-3 md:grid-cols-2", sectionBoxClass)}>
+                        <div className="space-y-1.5">
+                          <Label className={LABEL_TECH}>Concepto (ingreso)</Label>
+                          <Select
+                            value={cobroForm.conceptoId}
+                            onValueChange={(value) =>
+                              setCobroForm((prev) => ({ ...prev, conceptoId: value }))
+                            }
+                            disabled={conceptosIngreso.length === 0}
+                          >
+                            <SelectTrigger className={inputPanelClass}>
+                              <SelectValue
+                                placeholder={
+                                  conceptosIngreso.length === 0
+                                    ? "Sin conceptos de ingreso"
+                                    : "Seleccionar concepto"
+                                }
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {conceptosIngreso.map((concepto) => (
+                                <SelectItem key={concepto.id} value={concepto.id}>
+                                  {concepto.descripcion
+                                    ? `${concepto.concepto} - ${concepto.descripcion}`
+                                    : concepto.concepto}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className={LABEL_TECH}>Forma de pago</Label>
+                          <Select
+                            value={cobroForm.formaPagoId}
+                            onValueChange={(value) =>
+                              setCobroForm((prev) => ({ ...prev, formaPagoId: value }))
+                            }
+                            disabled={formasPagoActivas.length === 0}
+                          >
+                            <SelectTrigger className={inputPanelClass}>
+                              <SelectValue
+                                placeholder={
+                                  formasPagoActivas.length === 0
+                                    ? "Sin formas de pago"
+                                    : "Seleccionar forma de pago"
+                                }
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {formasPagoActivas.map((fp) => (
+                                <SelectItem key={fp.id} value={fp.id}>
+                                  {fp.nombre}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className={LABEL_TECH}>Monto</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={cobroForm.monto}
+                            onChange={(e) =>
+                              setCobroForm((prev) => ({ ...prev, monto: e.target.value }))
+                            }
+                            className={inputPanelClass}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className={LABEL_TECH}>Fecha</Label>
+                          <Input
+                            type="date"
+                            value={cobroForm.fecha}
+                            onChange={(e) =>
+                              setCobroForm((prev) => ({ ...prev, fecha: e.target.value }))
+                            }
+                            className={inputPanelClass}
+                          />
+                        </div>
+                        <div className="space-y-1.5 md:col-span-2">
+                          <Label className={LABEL_TECH}>Observaciones</Label>
+                          <Input
+                            value={cobroForm.observaciones}
+                            onChange={(e) =>
+                              setCobroForm((prev) => ({
+                                ...prev,
+                                observaciones: e.target.value,
+                              }))
+                            }
+                            className={inputPanelClass}
+                          />
+                        </div>
+                        <div className="md:col-span-2">
+                          <Button
+                            type="button"
+                            onClick={registrarCobro}
+                            disabled={
+                              isSavingCobro ||
+                              conceptosIngreso.length === 0 ||
+                              formasPagoActivas.length === 0
+                            }
+                            className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
+                          >
+                            {isSavingCobro ? "Registrando..." : "Registrar cobro"}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </section>
-                  </>
+                  </form>
                 )}
               </div>
 
@@ -1676,43 +1943,48 @@ export default function SociosPage() {
                     >
                       Volver al detalle
                     </Button>
-                  ) : isEditingSocio ? (
-                    <>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="order-2 border-zinc-700 text-zinc-200 hover:bg-zinc-800 sm:order-1"
-                        onClick={() => {
-                          if (socioDetail) setDraft({ ...socioDetail });
-                          setIsEditingSocio(false);
-                        }}
-                      >
-                        Cancelar
-                      </Button>
-                      <Button
-                        type="button"
-                        className="order-1 w-full bg-primary text-primary-foreground hover:bg-primary/90 sm:order-2 sm:ml-auto sm:w-auto"
-                        onClick={guardarEdicion}
-                      >
-                        Guardar
-                      </Button>
-                    </>
                   ) : (
                     <>
+                      {!isEditingSocio ? (
+                        socioInactivo ? (
+                          <Button
+                            type="button"
+                            className="order-2 bg-emerald-600 text-white hover:bg-emerald-500 sm:order-1"
+                            onClick={reactivarSocio}
+                          >
+                            Dar de alta
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="order-2 border-red-500/60 text-red-400 hover:bg-red-500/10 hover:text-red-300 sm:order-1"
+                            onClick={() => setBajaOpen(true)}
+                          >
+                            Dar de Baja
+                          </Button>
+                        )
+                      ) : null}
+                      {isEditingSocio ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="order-2 border-zinc-700 text-zinc-200 hover:bg-zinc-800 sm:order-1"
+                          onClick={() => {
+                            if (socioDetail) setDraft({ ...socioDetail });
+                            setIsEditingSocio(false);
+                          }}
+                        >
+                          Cancelar
+                        </Button>
+                      ) : null}
                       <Button
-                        type="button"
-                        variant="outline"
-                        className="order-2 border-primary/60 text-primary hover:bg-primary/10 hover:text-primary sm:order-1"
-                        onClick={() => setBajaOpen(true)}
-                      >
-                        Dar de baja
-                      </Button>
-                      <Button
-                        type="button"
+                        type={isEditingSocio ? "submit" : "button"}
+                        form={isEditingSocio ? "socio-edit-form" : undefined}
                         className="order-1 w-full bg-primary text-primary-foreground hover:bg-primary/90 sm:order-2 sm:ml-auto sm:w-auto"
-                        onClick={() => setIsEditingSocio(true)}
+                        onClick={isEditingSocio ? undefined : onStartEditing}
                       >
-                        Editar
+                        {isEditingSocio ? "Guardar" : "Editar"}
                       </Button>
                     </>
                   )}

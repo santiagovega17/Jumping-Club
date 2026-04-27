@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import useSWR from "swr";
 import {
   Cell,
   Legend,
@@ -10,10 +11,10 @@ import {
   Tooltip,
 } from "recharts";
 import {
+  AlertTriangle,
   ArrowDownLeft,
   ArrowUpRight,
   Calendar,
-  CalendarRange,
   Check,
   ChevronRight,
   Clock,
@@ -22,6 +23,13 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Card,
   CardContent,
@@ -66,6 +74,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PremiumCardTitle, PremiumSheetTitle } from "@/components/PremiumTitle";
 import { SectionHeading } from "@/components/SectionHeading";
 import {
@@ -80,6 +89,13 @@ import {
   type ConceptosFinancieros,
   loadCajaCatalogForFranquicia,
 } from "@/lib/franquicia-catalogo";
+import {
+  deleteMovimientoCajaAction,
+  crearMovimientoCajaAction,
+  obtenerBalanceCaja,
+  obtenerMovimientosRecientes,
+  obtenerProximosVencimientos,
+} from "@/actions/caja";
 
 const FONT_UI =
   "var(--font-sans), ui-sans-serif, system-ui, sans-serif";
@@ -87,25 +103,13 @@ const FONT_UI =
 const LABEL_TECH =
   "text-sm font-medium text-zinc-400 uppercase tracking-wider";
 
-const MESES = [
-  { value: "01", label: "Enero" },
-  { value: "02", label: "Febrero" },
-  { value: "03", label: "Marzo" },
-  { value: "04", label: "Abril" },
-  { value: "05", label: "Mayo" },
-  { value: "06", label: "Junio" },
-  { value: "07", label: "Julio" },
-  { value: "08", label: "Agosto" },
-  { value: "09", label: "Septiembre" },
-  { value: "10", label: "Octubre" },
-  { value: "11", label: "Noviembre" },
-  { value: "12", label: "Diciembre" },
-] as const;
-
 type CategoriaMov = "Ingreso" | "Egreso";
 
 type Movimiento = {
   id: string;
+  conceptoId: string;
+  formaPagoId: string;
+  socioId: string;
   fecha: string;
   concepto: string;
   descripcion: string;
@@ -171,8 +175,45 @@ function isPagoCuota(categoria: CategoriaMov, concepto: string) {
 
 type FormDraft = Omit<Movimiento, "id"> & { id?: string };
 
-function newId() {
-  return `mov-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+type ConceptoCajaOption = {
+  id: string;
+  tipo: "ingreso" | "egreso";
+  concepto: string;
+  descripcion: string;
+};
+
+type FormaPagoOption = {
+  id: string;
+  nombre: string;
+};
+
+type SocioOption = {
+  id: string;
+  nombre: string;
+};
+
+type CajaDataCache = {
+  balance: {
+    ingresos: number;
+    egresos: number;
+    saldo: number;
+    pendientes: number;
+  };
+  movimientos: Movimiento[];
+  proximos: Movimiento[];
+};
+
+function isDescripcionVacia(descripcion: string | null | undefined) {
+  return !descripcion || descripcion.trim().length === 0;
+}
+
+function shouldAutoSelectDetalle(
+  conceptoPrincipal: string,
+  detalles: ConceptoCajaOption[],
+) {
+  const principal = (conceptoPrincipal ?? "").trim().toLowerCase();
+  if (principal === "pago de cuota") return detalles.length > 0;
+  return detalles.length === 1;
 }
 
 function signedAmount(m: Movimiento) {
@@ -197,6 +238,9 @@ function emptyDraftFrom(
 ): FormDraft {
   const { concepto, descripcion } = firstConceptoDescFrom("Ingreso", catalog);
   return {
+    conceptoId: "",
+    formaPagoId: "",
+    socioId: "",
     fecha: new Date().toISOString().slice(0, 10),
     concepto,
     descripcion,
@@ -211,24 +255,31 @@ function emptyDraftFrom(
 }
 
 function movimientoToDraft(m: Movimiento): FormDraft {
-  const { id: _id, ...rest } = m;
+  const { id, ...rest } = m;
+  void id;
   return rest;
 }
 
 const PIE_PALETTE = ["#e41b68", "#b81858", "#ff6ba8", "#c084fc", "#38bdf8"];
 
-function filterByPeriod(
-  list: Movimiento[],
-  vistaAnual: boolean,
-  year: string,
-  month: string,
-) {
-  const y = year;
-  if (vistaAnual) {
-    return list.filter((m) => m.fecha.startsWith(y));
-  }
-  const prefix = `${y}-${month}`;
-  return list.filter((m) => m.fecha.startsWith(prefix));
+function getCurrentMonthRange() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  return {
+    startDate: start.toISOString().slice(0, 10),
+    endDate: end.toISOString().slice(0, 10),
+  };
+}
+
+function periodoLabelFromRange(startDate: string, endDate: string) {
+  const format = (iso: string) =>
+    new Intl.DateTimeFormat("es-AR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).format(new Date(`${iso}T00:00:00`));
+  return `${format(startDate)} - ${format(endDate)}`;
 }
 
 function isVenceEn7Dias(isoDate: string) {
@@ -240,48 +291,57 @@ function isVenceEn7Dias(isoDate: string) {
   return diffDays >= 0 && diffDays <= 7;
 }
 
-export default function AdministracionPage() {
-  const now = new Date();
-  const defaultYear = String(now.getFullYear());
-  const defaultMonth = String(now.getMonth() + 1).padStart(2, "0");
+function isPendienteVencido(row: Movimiento) {
+  if (row.estado !== "Pendiente" || !row.fechaVencimiento) return false;
+  const today = new Date();
+  const current = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const due = new Date(`${row.fechaVencimiento}T00:00:00`);
+  return due < current;
+}
 
-  const [year, setYear] = useState(defaultYear);
-  const [month, setMonth] = useState(defaultMonth);
-  const [vistaAnual, setVistaAnual] = useState(false);
+export default function AdministracionPage() {
+  const [cachedCajaData] = useState<CajaDataCache | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem("admin-caja-cache-v1");
+      if (!raw) return null;
+      return JSON.parse(raw) as CajaDataCache;
+    } catch {
+      return null;
+    }
+  });
+  const defaultRange = getCurrentMonthRange();
+  const [startDate, setStartDate] = useState(defaultRange.startDate);
+  const [endDate, setEndDate] = useState(defaultRange.endDate);
   const [filtroProximosVencimientos, setFiltroProximosVencimientos] = useState(false);
-  const [movimientos, setMovimientos] = useState<Movimiento[]>([]);
-  const [sociosCaja, setSociosCaja] = useState<string[]>([]);
+  const [sociosOptions, setSociosOptions] = useState<SocioOption[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   const [conceptosCatalog, setConceptosCatalog] =
     useState<ConceptosFinancieros>(EMPTY_CONCEPTOS);
   const [formasPagoList, setFormasPagoList] = useState<string[]>([]);
+  const [conceptosOptions, setConceptosOptions] = useState<ConceptoCajaOption[]>([]);
+  const [formasPagoOptions, setFormasPagoOptions] = useState<FormaPagoOption[]>([]);
 
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheetMode, setSheetMode] = useState<"edit" | "new">("edit");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [conceptoComboboxOpen, setConceptoComboboxOpen] = useState(false);
+  const [detalleComboboxOpen, setDetalleComboboxOpen] = useState(false);
   const [draft, setDraft] = useState<FormDraft>(() =>
     emptyDraftFrom(EMPTY_CONCEPTOS, []),
   );
   const [socioComboboxOpen, setSocioComboboxOpen] = useState(false);
-  const [isEditingMovimiento, setIsEditingMovimiento] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Movimiento | null>(null);
+  const [hasTriedSubmitMovimiento, setHasTriedSubmitMovimiento] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const [consolidadoOpen, setConsolidadoOpen] = useState(false);
   const [expConsIng, setExpConsIng] = useState<Record<string, boolean>>({});
   const [expConsEgr, setExpConsEgr] = useState<Record<string, boolean>>({});
 
-  const [chartReady, setChartReady] = useState(false);
-  useEffect(() => {
-    setChartReady(true);
-  }, []);
-
-  useEffect(() => {
-    if (formasPagoList.length === 0) return;
-    setDraft((d) =>
-      formasPagoList.includes(d.formaPago)
-        ? d
-        : { ...d, formaPago: formasPagoList[0] ?? "" },
-    );
-  }, [formasPagoList]);
+  const chartReady = true;
 
   useEffect(() => {
     const loadData = async () => {
@@ -291,6 +351,7 @@ export default function AdministracionPage() {
           data: { user },
         } = await supabase.auth.getUser();
         if (!user) return;
+        setCurrentUserId(user.id);
 
         const { data: perfilAdmin } = await supabase
           .from("perfiles")
@@ -306,46 +367,175 @@ export default function AdministracionPage() {
         setConceptosCatalog(conceptos);
         setFormasPagoList(formasPago);
 
-        const { data: pagos } = await supabase
-          .from("pagos")
-          .select("id,monto,nombre_plan_historico,mes_correspondiente,fecha_pago,socio:socios(perfil:perfiles(nombre))")
-          .eq("franquicia_id", perfilAdmin.franquicia_id);
+        const [{ data: conceptosRows }, { data: formasRows }, { data: sociosRows }] =
+          await Promise.all([
+            supabase
+              .from("conceptos_caja")
+              .select("id,tipo,concepto,descripcion")
+              .eq("franquicia_id", perfilAdmin.franquicia_id)
+              .order("concepto", { ascending: true })
+              .order("descripcion", { ascending: true }),
+            supabase
+              .from("formas_pago")
+              .select("id,nombre,activo")
+              .eq("franquicia_id", perfilAdmin.franquicia_id)
+              .eq("activo", true)
+              .order("nombre", { ascending: true }),
+            supabase
+              .from("socios")
+              .select("id,perfil:perfiles(nombre)")
+              .eq("franquicia_id", perfilAdmin.franquicia_id),
+          ]);
 
-        const mappedMovs: Movimiento[] = (pagos ?? []).map((p: any) => ({
-          id: p.id,
-          fecha: p.fecha_pago?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),
-          concepto: "Cuotas",
-          descripcion: p.nombre_plan_historico ?? "Mensual",
-          categoria: "Ingreso",
-          monto: Number(p.monto) || 0,
-          formaPago: "",
-          observaciones: "",
-          estado: "Pagado",
-          fechaVencimiento: "",
-          socio: p.socio?.perfil?.nombre ?? "",
-        }));
-        setMovimientos(mappedMovs);
+        setConceptosOptions(
+          ((conceptosRows ?? []) as Array<{
+            id: string;
+            tipo: "ingreso" | "egreso";
+            concepto: string;
+            descripcion: string;
+          }>).map((row) => ({
+            id: row.id,
+            tipo: row.tipo,
+            concepto: row.concepto,
+            descripcion: row.descripcion,
+          })),
+        );
+        setFormasPagoOptions(
+          ((formasRows ?? []) as Array<{ id: string; nombre: string }>).map((row) => ({
+            id: row.id,
+            nombre: row.nombre,
+          })),
+        );
 
-        const { data: perfilesSocios } = await supabase
-          .from("perfiles")
-          .select("nombre")
-          .eq("franquicia_id", perfilAdmin.franquicia_id)
-          .eq("rol", "socio");
-        setSociosCaja((perfilesSocios ?? []).map((s) => s.nombre));
+        const sociosParsed = ((sociosRows ?? []) as Array<{
+          id: string;
+          perfil?: { nombre?: string | null } | null;
+        }>)
+          .map((row) => ({ id: row.id, nombre: row.perfil?.nombre ?? "Sin nombre" }))
+          .sort((a, b) => a.nombre.localeCompare(b.nombre));
+        setSociosOptions(sociosParsed);
       } catch {
-        setMovimientos([]);
-        setSociosCaja([]);
+        setSociosOptions([]);
         setConceptosCatalog(EMPTY_CONCEPTOS);
         setFormasPagoList([]);
+        setConceptosOptions([]);
+        setFormasPagoOptions([]);
       }
     };
     loadData();
   }, []);
 
-  const movimientosPeriodo = useMemo(
-    () => filterByPeriod(movimientos, vistaAnual, year, month),
-    [movimientos, vistaAnual, year, month],
+  const { data: cajaData, isLoading: isCajaLoading, error: cajaError, mutate: mutateCaja } = useSWR(
+    currentUserId && startDate && endDate && startDate <= endDate
+      ? ["caja-data", currentUserId, startDate, endDate]
+      : null,
+    async () => {
+      const [balanceRes, vencimientosRes, movimientosRes] = await Promise.all([
+        obtenerBalanceCaja({ userId: currentUserId!, startDate, endDate }),
+        obtenerProximosVencimientos({ userId: currentUserId!, startDate, endDate, limit: 10 }),
+        obtenerMovimientosRecientes({ userId: currentUserId!, startDate, endDate, limit: 250 }),
+      ]);
+
+      type MovimientoCajaFetch = {
+        id: string;
+        fecha: string | null;
+        tipo: string | null;
+        monto: number | null;
+        estado?: string | null;
+        fecha_vencimiento?: string | null;
+        observaciones?: string | null;
+        concepto_id?: string | null;
+        forma_pago_id?: string | null;
+        socio_id?: string | null;
+        concepto?: { concepto?: string | null; descripcion?: string | null } | null;
+        forma?: { nombre?: string | null } | null;
+        socio?: { perfil?: { nombre?: string | null } | null } | null;
+      };
+
+      type VencimientoFetch = {
+        id: string;
+        monto: number | null;
+        fecha_vencimiento?: string | null;
+        concepto?: { concepto?: string | null; descripcion?: string | null } | null;
+      };
+
+      const mappedMovs: Movimiento[] = movimientosRes.ok
+        ? ((movimientosRes.data ?? []) as MovimientoCajaFetch[]).map((row) => ({
+            id: row.id,
+            conceptoId: String(row.concepto_id ?? ""),
+            formaPagoId: String(row.forma_pago_id ?? ""),
+            socioId: String(row.socio_id ?? ""),
+            fecha: row.fecha?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),
+            concepto: row.concepto?.concepto ?? "Sin concepto",
+            descripcion: row.concepto?.descripcion ?? "",
+            categoria: row.tipo === "egreso" ? "Egreso" : "Ingreso",
+            monto: Number(row.monto) || 0,
+            formaPago: row.forma?.nombre ?? "",
+            observaciones: row.observaciones ?? "",
+            estado:
+              String(row.estado ?? "pagado").toLowerCase() === "pendiente"
+                ? "Pendiente"
+                : "Pagado",
+            fechaVencimiento: row.fecha_vencimiento?.slice(0, 10) ?? "",
+            socio: row.socio?.perfil?.nombre ?? "",
+          }))
+        : [];
+
+      const mappedVencimientos: Movimiento[] = vencimientosRes.ok
+        ? ((vencimientosRes.data ?? []) as VencimientoFetch[]).map((row) => ({
+            id: row.id,
+            conceptoId: "",
+            formaPagoId: "",
+            socioId: "",
+            fecha: row.fecha_vencimiento?.slice(0, 10) ?? "",
+            concepto: row.concepto?.concepto ?? "Sin concepto",
+            descripcion: row.concepto?.descripcion ?? "",
+            categoria: "Egreso",
+            monto: Number(row.monto) || 0,
+            formaPago: "",
+            observaciones: "",
+            estado: "Pendiente",
+            fechaVencimiento: row.fecha_vencimiento?.slice(0, 10) ?? "",
+            socio: "",
+          }))
+        : [];
+
+      return {
+        balance: balanceRes.ok
+          ? balanceRes.data
+          : { ingresos: 0, egresos: 0, saldo: 0, pendientes: 0 },
+        movimientos: mappedMovs,
+        proximos: mappedVencimientos,
+      };
+    },
+    {
+      fallbackData: cachedCajaData ?? undefined,
+      keepPreviousData: true,
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+      revalidateIfStale: false,
+      dedupingInterval: 60_000,
+    },
   );
+
+  useEffect(() => {
+    if (!cajaData || typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("admin-caja-cache-v1", JSON.stringify(cajaData));
+    } catch {
+      // ignore localStorage write errors
+    }
+  }, [cajaData]);
+
+  const cajaDataView = cajaData ?? cachedCajaData;
+  const hasCajaData = Boolean(cajaDataView);
+  const balanceCaja = cajaDataView?.balance ?? null;
+  const movimientos = useMemo(() => cajaDataView?.movimientos ?? [], [cajaDataView]);
+  const proximosVencimientosTop = useMemo(
+    () => cajaDataView?.proximos ?? [],
+    [cajaDataView],
+  );
+  const movimientosPeriodo = useMemo(() => movimientos, [movimientos]);
 
   const filtrados = useMemo(() => {
     const base = movimientosPeriodo;
@@ -354,45 +544,6 @@ export default function AdministracionPage() {
       (m) => m.estado === "Pendiente" && isVenceEn7Dias(m.fechaVencimiento),
     );
   }, [movimientosPeriodo, filtroProximosVencimientos]);
-
-  const saldos = useMemo(() => {
-    let actual = 0;
-    let proyectado = 0;
-    for (const m of movimientosPeriodo) {
-      const s = signedAmount(m);
-      proyectado += s;
-      if (m.estado === "Pagado") actual += s;
-    }
-    return { saldoActual: actual, saldoProyectado: proyectado };
-  }, [movimientosPeriodo]);
-
-  const totalesCaja = useMemo(() => {
-    let ing = 0;
-    let egr = 0;
-    for (const m of movimientosPeriodo) {
-      if (m.estado !== "Pagado") continue;
-      if (m.categoria === "Ingreso") ing += m.monto;
-      else egr += m.monto;
-    }
-    return { ingresosPagados: ing, egresosPagados: egr };
-  }, [movimientosPeriodo]);
-
-  const totalPendientes = useMemo(
-    () =>
-      movimientosPeriodo
-        .filter((m) => m.estado === "Pendiente")
-        .reduce((sum, m) => sum + m.monto, 0),
-    [movimientosPeriodo],
-  );
-
-  const proximosVencimientosTop = useMemo(
-    () =>
-      movimientosPeriodo
-        .filter((m) => m.categoria === "Egreso" && m.estado === "Pendiente" && isVenceEn7Dias(m.fechaVencimiento))
-        .sort((a, b) => a.fechaVencimiento.localeCompare(b.fechaVencimiento))
-        .slice(0, 3),
-    [movimientosPeriodo],
-  );
 
   const pieData = useMemo(() => {
     const map: Record<string, number> = {};
@@ -446,41 +597,24 @@ export default function AdministracionPage() {
     setConsolidadoOpen(false);
     setSheetMode("new");
     setEditingId(null);
-    setIsEditingMovimiento(true);
+    setHasTriedSubmitMovimiento(false);
     setSheetOpen(true);
-    void (async () => {
-      try {
-        const supabase = createSupabaseClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) return;
-        const { data: perfil } = await supabase
-          .from("perfiles")
-          .select("franquicia_id")
-          .eq("id", user.id)
-          .single();
-        if (!perfil?.franquicia_id) return;
-        const { conceptos, formasPago } = await loadCajaCatalogForFranquicia(
-          supabase,
-          perfil.franquicia_id,
-        );
-        setConceptosCatalog(conceptos);
-        setFormasPagoList(formasPago);
-        setDraft(emptyDraftFrom(conceptos, formasPago));
-      } catch {
-        setConceptosCatalog(EMPTY_CONCEPTOS);
-        setFormasPagoList([]);
-        setDraft(emptyDraftFrom(EMPTY_CONCEPTOS, []));
-      }
-    })();
-  }, []);
+    const initial = emptyDraftFrom(conceptosCatalog, formasPagoList);
+    const firstForma = formasPagoOptions[0];
+    setDraft({
+      ...initial,
+      formaPagoId: firstForma?.id ?? "",
+      formaPago: firstForma?.nombre ?? "",
+      socioId: "",
+      socio: "",
+    });
+  }, [conceptosCatalog, formasPagoList, formasPagoOptions]);
 
   const openEdit = useCallback((m: Movimiento) => {
     setConsolidadoOpen(false);
     setSheetMode("edit");
     setEditingId(m.id);
-    setIsEditingMovimiento(false);
+    setHasTriedSubmitMovimiento(false);
     setSheetOpen(true);
     void (async () => {
       try {
@@ -513,12 +647,6 @@ export default function AdministracionPage() {
           const fb = firstConceptoDescFrom(m.categoria, conceptos);
           d = { ...d, concepto: fb.concepto, descripcion: fb.descripcion };
         }
-        if (
-          formasPago.length > 0 &&
-          (!d.formaPago || !formasPago.includes(d.formaPago))
-        ) {
-          d = { ...d, formaPago: formasPago[0] ?? "" };
-        }
         setDraft(d);
       } catch {
         setConceptosCatalog(EMPTY_CONCEPTOS);
@@ -528,92 +656,187 @@ export default function AdministracionPage() {
     })();
   }, []);
 
-  const saveDraft = useCallback(() => {
+  const saveDraft = useCallback(async () => {
+    setHasTriedSubmitMovimiento(true);
+    setSubmitError(null);
     const montoNum = Math.abs(Number(draft.monto) || 0);
+    const conceptoRow = conceptosOptions.find((item) => item.id === draft.conceptoId);
+    const formaPagoRow = formasPagoOptions.find((item) => item.id === draft.formaPagoId);
+
     if (
       montoNum === 0 ||
-      !isValidConceptoDescripcionFrom(
-        draft.categoria,
-        draft.concepto,
-        draft.descripcion,
-        conceptosCatalog,
-      ) ||
-      (formasPagoList.length > 0 &&
-        (!draft.formaPago || !formasPagoList.includes(draft.formaPago)))
+      !draft.conceptoId ||
+      !draft.formaPagoId
     ) {
+      toast.error("Completá monto, concepto y forma de pago");
       return;
     }
 
-    const base: Movimiento = {
-      id: editingId ?? newId(),
-      fecha: draft.fecha,
-      concepto: draft.concepto,
-      descripcion: draft.descripcion,
-      categoria: draft.categoria,
-      monto: montoNum,
-      formaPago: draft.formaPago,
-      observaciones: draft.observaciones.trim(),
-      estado: draft.estado,
-      fechaVencimiento:
-        draft.estado === "Pendiente" ? draft.fechaVencimiento : "",
-      socio: isPagoCuota(draft.categoria, draft.concepto) ? draft.socio : "",
-    };
-
-    setMovimientos((prev) => {
-      if (sheetMode === "new") return [...prev, base];
-      return prev.map((x) => (x.id === editingId ? base : x));
-    });
-    setSheetOpen(false);
-    setIsEditingMovimiento(false);
     if (sheetMode === "new") {
-      if (base.categoria === "Ingreso" && base.socio) {
-        toast.success("Pago registrado exitosamente", {
-          action: {
-            label: "Enviar Comprobante",
-            onClick: () => {
-              toast.success("Comprobante enviado al correo del socio");
-            },
-          },
-        });
-      } else {
-        toast.success("Movimiento registrado");
+      if (!currentUserId) {
+        toast.error("No se pudo identificar el usuario actual");
+        return;
       }
-    } else {
-      toast.success("Movimiento actualizado correctamente");
+      if (!conceptoRow?.id || !formaPagoRow?.id) {
+        toast.error("Concepto o forma de pago inválidos");
+        return;
+      }
+
+      const result = await crearMovimientoCajaAction({
+        userId: currentUserId,
+        tipo: draft.categoria === "Ingreso" ? "ingreso" : "egreso",
+        monto: montoNum,
+        conceptoId: conceptoRow.id,
+        formaPagoId: draft.formaPagoId,
+        socioId: draft.socioId || null,
+        fecha: draft.fecha,
+        observaciones: draft.observaciones.trim() || null,
+      });
+
+      if (!result.ok) {
+        setSubmitError(result.error ?? "No se pudo registrar el movimiento");
+        toast.error(result.error ?? "No se pudo registrar el movimiento");
+        return;
+      }
+      if (result.warning) {
+        toast.error(result.warning);
+      }
+
+      setSheetOpen(false);
+      await mutateCaja();
+      toast.success("Movimiento registrado correctamente");
+      return;
     }
-  }, [conceptosCatalog, draft, editingId, formasPagoList, sheetMode]);
 
-  const deleteMovimiento = useCallback(() => {
-    if (sheetMode !== "edit" || !editingId) return;
-    setMovimientos((prev) => prev.filter((m) => m.id !== editingId));
     setSheetOpen(false);
+    await mutateCaja();
+    toast.success("Movimiento registrado");
+  }, [
+    conceptosOptions,
+    currentUserId,
+    draft,
+    formasPagoOptions,
+    sheetMode,
+    mutateCaja,
+  ]);
+
+  const deleteMovimiento = useCallback(async (movimiento: Movimiento) => {
+    if (!currentUserId) {
+      toast.error("No se pudo identificar el usuario actual");
+      return;
+    }
+    const result = await deleteMovimientoCajaAction({
+      userId: currentUserId,
+      movimientoId: movimiento.id,
+    });
+    if (!result.ok) {
+      toast.error(result.error ?? "No se pudo eliminar el movimiento");
+      return;
+    }
+    setDeleteDialogOpen(false);
+    setDeleteTarget(null);
+    if (editingId === movimiento.id) {
+      setSheetOpen(false);
+      setEditingId(null);
+    }
+    await mutateCaja();
     toast.success("Movimiento eliminado");
-  }, [editingId, sheetMode]);
+  }, [currentUserId, editingId, mutateCaja]);
 
-  const draftConceptoList = conceptosKeysFrom(draft.categoria, conceptosCatalog);
-  const draftDescList = descripcionesForCat(
-    draft.categoria,
-    draft.concepto,
-    conceptosCatalog,
+  const conceptosByCategoria = useMemo(
+    () =>
+      conceptosOptions.filter(
+        (item) =>
+          item.tipo === (draft.categoria === "Ingreso" ? "ingreso" : "egreso") &&
+          Boolean(item.id) &&
+          ((item.descripcion && item.descripcion.trim().length > 0) ||
+            item.concepto === "Pago de Cuota"),
+      ),
+    [conceptosOptions, draft.categoria],
   );
-  const fieldsDisabled = sheetMode === "edit" && !isEditingMovimiento;
+  const conceptosPrincipalesUnicos = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          conceptosByCategoria
+            .map((item) => String(item.concepto ?? "").trim())
+            .filter(Boolean),
+        ),
+      ),
+    [conceptosByCategoria],
+  );
+  const detallesConceptoSeleccionado = useMemo(
+    () =>
+      conceptosByCategoria.filter(
+        (item) => String(item.concepto ?? "").trim() === String(draft.concepto ?? "").trim(),
+      ),
+    [conceptosByCategoria, draft.concepto],
+  );
+  const autoDetalle = useMemo(
+    () => shouldAutoSelectDetalle(draft.concepto, detallesConceptoSeleccionado),
+    [draft.concepto, detallesConceptoSeleccionado],
+  );
+  const shouldRenderDetalleSelector = useMemo(
+    () => !autoDetalle && detallesConceptoSeleccionado.length > 1,
+    [autoDetalle, detallesConceptoSeleccionado.length],
+  );
+  const safeFormaPagoOptions = useMemo(
+    () =>
+      formasPagoOptions.filter(
+        (item) => Boolean(item?.id) && Boolean(String(item?.nombre ?? "").trim()),
+      ),
+    [formasPagoOptions],
+  );
+  const safeSociosOptions = useMemo(
+    () =>
+      sociosOptions.filter(
+        (socio) => Boolean(socio?.id) && Boolean(String(socio?.nombre ?? "").trim()),
+      ),
+    [sociosOptions],
+  );
+  const fieldsDisabled = sheetMode === "edit";
+  const shouldShowValidationErrors = hasTriedSubmitMovimiento;
 
-  const saveDisabled =
-    !(Number(draft.monto) > 0) ||
-    !isValidConceptoDescripcionFrom(
-      draft.categoria,
-      draft.concepto,
-      draft.descripcion,
-      conceptosCatalog,
-    ) ||
-    (formasPagoList.length > 0 &&
-      (!draft.formaPago || !formasPagoList.includes(draft.formaPago))) ||
-    (formasPagoList.length === 0 && sheetMode === "new") ||
-    (isPagoCuota(draft.categoria, draft.concepto) && !draft.socio);
+  const validationErrors = useMemo(() => {
+    const errors: Record<string, string> = {};
+    if (!(Number(draft.monto) > 0)) {
+      errors.monto = "Ingresá un monto mayor a 0.";
+    }
+    if (!draft.concepto) {
+      errors.concepto = "Seleccioná un concepto principal.";
+    }
+    if (!autoDetalle && draft.concepto && !draft.conceptoId) {
+      errors.detalle = "Seleccioná una descripción/detalle para continuar.";
+    }
+    if (!draft.conceptoId) {
+      errors.conceptoId = "Concepto inválido o incompleto.";
+    }
+    if (!draft.formaPagoId) {
+      errors.formaPagoId = "Seleccioná una forma de pago.";
+    }
+    if (safeFormaPagoOptions.length === 0 && sheetMode === "new") {
+      errors.formaPagoCatalog = "No hay formas de pago configuradas.";
+    }
+    if (isPagoCuota(draft.categoria, draft.concepto) && !draft.socioId) {
+      errors.socioId = "Seleccioná un socio para Pago de Cuota.";
+    }
+    return errors;
+  }, [autoDetalle, draft, safeFormaPagoOptions.length, sheetMode]);
 
-  const periodoLabel = vistaAnual
-    ? `Año ${year}`
-    : `${MESES.find((x) => x.value === month)?.label ?? month} ${year}`;
+  const saveDisabled = Object.keys(validationErrors).length > 0;
+
+  useEffect(() => {
+    if (!sheetOpen || !autoDetalle || draft.conceptoId || detallesConceptoSeleccionado.length === 0) return;
+    const detalleDefault = detallesConceptoSeleccionado[0];
+    if (!detalleDefault?.id) return;
+    setDraft((d) => ({
+      ...d,
+      conceptoId: String(detalleDefault.id),
+      descripcion: detalleDefault.descripcion ?? "",
+    }));
+  }, [autoDetalle, detallesConceptoSeleccionado, draft.conceptoId, sheetOpen]);
+
+  const periodoLabel = periodoLabelFromRange(startDate, endDate);
 
   const kpiNumberClass = "text-3xl font-semibold tracking-tight tabular-nums";
   return (
@@ -637,75 +860,25 @@ export default function AdministracionPage() {
             <PopoverContent className="w-80" align="end">
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <Label className={LABEL_TECH}>Año</Label>
-                  <Select value={year} onValueChange={setYear}>
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {["2025", "2026", "2027"].map((y) => (
-                        <SelectItem key={y} value={y}>
-                          {y}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div
-                  className={cn(
-                    "space-y-2",
-                    vistaAnual && "pointer-events-none opacity-40",
-                  )}
-                >
-                  <Label className={LABEL_TECH}>Mes</Label>
-                  <Select
-                    value={month}
-                    onValueChange={setMonth}
-                    disabled={vistaAnual}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {MESES.map((mes) => (
-                        <SelectItem key={mes.value} value={mes.value}>
-                          {mes.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Label htmlFor="filtro-desde" className={LABEL_TECH}>Desde</Label>
+                  <Input
+                    id="filtro-desde"
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="border-zinc-800 bg-zinc-950 text-foreground"
+                  />
                 </div>
                 <div className="flex flex-col gap-2">
-                  <span className={LABEL_TECH}>Vista</span>
-                  <div className="flex gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className={cn(
-                        "flex-1 border-zinc-800 bg-zinc-950",
-                        !vistaAnual &&
-                          "border-[#5ab253]/50 bg-[#5ab253]/10 text-[#7fd672]",
-                      )}
-                      onClick={() => setVistaAnual(false)}
-                    >
-                      <CalendarRange className="mr-1 size-4 shrink-0" />
-                      Mensual
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className={cn(
-                        "flex-1 border-zinc-800 bg-zinc-950",
-                        vistaAnual &&
-                          "border-[#e41b68]/50 bg-[#e41b68]/10 text-[#ff8fb8]",
-                      )}
-                      onClick={() => setVistaAnual(true)}
-                    >
-                      Anual
-                    </Button>
-                  </div>
+                  <Label htmlFor="filtro-hasta" className={LABEL_TECH}>Hasta</Label>
+                  <Input
+                    id="filtro-hasta"
+                    type="date"
+                    value={endDate}
+                    min={startDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="border-zinc-800 bg-zinc-950 text-foreground"
+                  />
                 </div>
                 <p className="border-t border-zinc-800/50 pt-2 text-sm text-zinc-500">
                   Activo:{" "}
@@ -737,6 +910,11 @@ export default function AdministracionPage() {
           </Button>
         </div>
       </div>
+      {cajaError ? (
+        <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+          No se pudieron cargar los datos de caja.
+        </div>
+      ) : null}
 
       <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Card className="border-zinc-800/50 bg-card shadow-none ring-0">
@@ -745,7 +923,11 @@ export default function AdministracionPage() {
           </CardHeader>
           <CardContent>
             <p className={cn(kpiNumberClass, "text-[#5ab253]")}>
-              {formatPesos(totalesCaja.ingresosPagados)}
+              {hasCajaData && balanceCaja ? (
+                formatPesos(balanceCaja.ingresos)
+              ) : (
+                <Skeleton className="h-9 w-36 bg-zinc-800" />
+              )}
             </p>
           </CardContent>
         </Card>
@@ -755,7 +937,11 @@ export default function AdministracionPage() {
           </CardHeader>
           <CardContent>
             <p className={cn(kpiNumberClass, "text-[#e41b68]")}>
-              {formatPesos(totalesCaja.egresosPagados)}
+              {hasCajaData && balanceCaja ? (
+                formatPesos(balanceCaja.egresos)
+              ) : (
+                <Skeleton className="h-9 w-36 bg-zinc-800" />
+              )}
             </p>
           </CardContent>
         </Card>
@@ -764,8 +950,17 @@ export default function AdministracionPage() {
             <p className={KPI_TITLE_CLASS}>Saldo</p>
           </CardHeader>
           <CardContent>
-            <p className={cn(kpiNumberClass, "text-[#3b82f6]")}>
-              {formatPesos(saldos.saldoActual)}
+            <p
+              className={cn(
+                kpiNumberClass,
+                (balanceCaja?.saldo ?? 0) < 0 ? "text-red-500" : "text-green-500",
+              )}
+            >
+              {hasCajaData && balanceCaja ? (
+                formatPesos(balanceCaja.saldo)
+              ) : (
+                <Skeleton className="h-9 w-36 bg-zinc-800" />
+              )}
             </p>
           </CardContent>
         </Card>
@@ -775,7 +970,11 @@ export default function AdministracionPage() {
           </CardHeader>
           <CardContent>
             <p className={cn(kpiNumberClass, "text-amber-300")}>
-              {formatPesos(totalPendientes)}
+              {hasCajaData && balanceCaja ? (
+                formatPesos(balanceCaja.pendientes)
+              ) : (
+                <Skeleton className="h-9 w-36 bg-zinc-800" />
+              )}
             </p>
           </CardContent>
         </Card>
@@ -800,7 +999,13 @@ export default function AdministracionPage() {
                 </tr>
               </thead>
               <tbody>
-                {proximosVencimientosTop.length === 0 ? (
+                {!hasCajaData && isCajaLoading ? (
+                  <tr>
+                    <td colSpan={4} className="px-3 py-4 text-center text-sm text-zinc-500">
+                      Cargando...
+                    </td>
+                  </tr>
+                ) : proximosVencimientosTop.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="px-3 py-4 text-center text-sm text-zinc-500">
                       No hay vencimientos en los próximos 7 días.
@@ -863,33 +1068,35 @@ export default function AdministracionPage() {
                     Monto
                   </TableHead>
                   <TableHead className={LABEL_TECH}>Estado</TableHead>
+                  <TableHead className={cn("text-right", LABEL_TECH)}>Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtrados.length === 0 ? (
+                {!hasCajaData && isCajaLoading ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="py-8 text-center text-zinc-500">
+                    <TableCell colSpan={7} className="py-8 text-center text-zinc-500">
+                      Cargando...
+                    </TableCell>
+                  </TableRow>
+                ) : filtrados.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-8 text-center text-zinc-500">
                       No hay movimientos registrados.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filtrados.map((row) => (
-                    <TableRow
-                      key={row.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => openEdit(row)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          openEdit(row);
-                        }
-                      }}
-                      className={cn(
-                        "cursor-pointer border-zinc-800 hover:bg-zinc-800/50",
-                        row.estado === "Pendiente" && "bg-[#e41b68]/[0.07]",
-                      )}
-                    >
+                  filtrados.map((row) => {
+                    const pendienteVencido = isPendienteVencido(row);
+                    return (
+                      <TableRow
+                        key={row.id}
+                        onClick={() => openEdit(row)}
+                        className={cn(
+                          "cursor-pointer border-zinc-800 hover:bg-muted/50",
+                          row.estado === "Pendiente" && "bg-[#e41b68]/[0.07]",
+                          pendienteVencido && "ring-1 ring-[#e41b68]/60",
+                        )}
+                      >
                       <TableCell className="text-zinc-500">
                         {row.categoria === "Ingreso" ? (
                           <ArrowDownLeft
@@ -936,20 +1143,47 @@ export default function AdministracionPage() {
                       >
                         {formatPesos(signedAmount(row))}
                       </TableCell>
-                      <TableCell>
-                        {row.estado === "Pendiente" ? (
-                          <Badge variant="pending" className="font-normal">
-                            <Clock className="size-3.5" />
-                            Pendiente
-                          </Badge>
-                        ) : (
-                          <Badge variant="success" className="font-normal">
-                            Pagado
-                          </Badge>
-                        )}
+                        <TableCell>
+                          {row.estado === "Pendiente" ? (
+                            pendienteVencido ? (
+                              <Badge variant="destructive" className="font-normal">
+                                <AlertTriangle className="size-3.5" />
+                                Pendiente vencido
+                              </Badge>
+                            ) : (
+                              <Badge variant="pending" className="font-normal">
+                                <Clock className="size-3.5" />
+                                Pendiente
+                              </Badge>
+                            )
+                          ) : (
+                            <Badge variant="success" className="font-normal">
+                              Pagado
+                            </Badge>
+                          )}
+                        </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="text-[#e41b68] hover:text-[#ff8fb8]"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setDeleteTarget(row);
+                              setDeleteDialogOpen(true);
+                            }}
+                          >
+                            <Trash2 className="size-4" aria-hidden />
+                            <span className="sr-only">Eliminar movimiento</span>
+                          </Button>
+                        </div>
                       </TableCell>
-                    </TableRow>
-                  ))
+                      </TableRow>
+                    );
+                  })
                 )}
               </TableBody>
                 </Table>
@@ -1189,7 +1423,9 @@ export default function AdministracionPage() {
         onOpenChange={(open) => {
           setSheetOpen(open);
           if (open) setConsolidadoOpen(false);
-          if (!open) setIsEditingMovimiento(false);
+          if (!open) {
+            setHasTriedSubmitMovimiento(false);
+          }
         }}
       >
         <SheetContent
@@ -1198,14 +1434,27 @@ export default function AdministracionPage() {
         >
           <SheetHeader>
             <PremiumSheetTitle>
-              {sheetMode === "new" ? "Nuevo movimiento" : "Editar movimiento"}
+              {sheetMode === "new" ? "Nuevo movimiento" : "Detalle de movimiento"}
             </PremiumSheetTitle>
             <SheetDescription className="text-sm text-zinc-500">
-              Completá los datos y guardá para actualizar el balance.
+              {sheetMode === "new"
+                ? "Completá los datos y guardá para actualizar el balance."
+                : "Vista de solo lectura. Los movimientos guardados no se pueden editar."}
             </SheetDescription>
           </SheetHeader>
 
-          <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 pb-4">
+          <form
+            id="movimiento-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (sheetMode === "edit") return;
+              void saveDraft();
+            }}
+            className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 pb-4"
+          >
+            {submitError ? (
+              <p className="text-sm text-red-500">{submitError}</p>
+            ) : null}
             <div className="space-y-1.5">
               <Label htmlFor="f-fecha" className={LABEL_TECH}>
                 Fecha
@@ -1217,9 +1466,14 @@ export default function AdministracionPage() {
                 onChange={(e) =>
                   setDraft((d) => ({ ...d, fecha: e.target.value }))
                 }
-                disabled={fieldsDisabled}
+                disabled={sheetMode === "edit" || fieldsDisabled}
                 className="border-zinc-800 bg-zinc-950 text-foreground"
               />
+              {sheetMode === "edit" ? (
+                <p className="text-sm italic text-zinc-500">
+                  La fecha no se puede modificar en movimientos existentes.
+                </p>
+              ) : null}
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
@@ -1227,21 +1481,45 @@ export default function AdministracionPage() {
                 <Select
                   value={draft.categoria}
                   onValueChange={(v: CategoriaMov) => {
-                    const { concepto, descripcion } = firstConceptoDescFrom(
-                      v,
-                      conceptosCatalog,
+                    const conceptosCategoria = conceptosOptions.filter(
+                      (item) =>
+                        item.tipo === (v === "Ingreso" ? "ingreso" : "egreso") &&
+                        ((item.descripcion && item.descripcion.trim().length > 0) ||
+                          item.concepto === "Pago de Cuota"),
                     );
+                    const primerConceptoPrincipal = Array.from(
+                      new Set(
+                        conceptosCategoria
+                          .map((item) => String(item.concepto ?? "").trim())
+                          .filter(Boolean),
+                      ),
+                    )[0];
+                    const detallesPrimerConcepto = conceptosCategoria.filter(
+                      (item) => item.concepto === primerConceptoPrincipal,
+                    );
+                    const debeAutoseleccionar = shouldAutoSelectDetalle(
+                      primerConceptoPrincipal ?? "",
+                      detallesPrimerConcepto,
+                    );
+                    const detalleDefault =
+                      debeAutoseleccionar && detallesPrimerConcepto.length > 0
+                        ? detallesPrimerConcepto[0]
+                        : null;
                     setDraft((d) => ({
                       ...d,
                       categoria: v,
-                      concepto,
-                      descripcion,
-                      socio: isPagoCuota(v, concepto) ? d.socio : "",
+                      conceptoId: detalleDefault?.id ?? "",
+                      concepto: primerConceptoPrincipal ?? "",
+                      descripcion: detalleDefault?.descripcion ?? "",
+                      socio:
+                        isPagoCuota(v, primerConceptoPrincipal ?? "") ? d.socio : "",
+                      socioId:
+                        isPagoCuota(v, primerConceptoPrincipal ?? "") ? d.socioId : "",
                     }));
                   }}
                   disabled={fieldsDisabled}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger tabIndex={0}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1266,70 +1544,173 @@ export default function AdministracionPage() {
                       monto: Math.abs(Number(e.target.value) || 0),
                     }))
                   }
-                  disabled={fieldsDisabled}
+                  disabled={sheetMode === "edit" || fieldsDisabled}
                   className="border-zinc-800 bg-zinc-950 text-foreground"
                 />
+                {sheetMode === "edit" ? (
+                  <p className="text-sm italic text-zinc-500">
+                    El monto no se puede modificar en movimientos existentes.
+                  </p>
+                ) : null}
+                {shouldShowValidationErrors && validationErrors.monto ? (
+                  <p className="text-red-500 text-sm">{validationErrors.monto}</p>
+                ) : null}
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label className={LABEL_TECH}>Concepto</Label>
-              <Select
-                value={draft.concepto}
-                onValueChange={(concepto) => {
-                  const list = descripcionesForCat(
-                    draft.categoria,
-                    concepto,
-                    conceptosCatalog,
-                  );
-                  const descripcion = list.includes(draft.descripcion)
-                    ? draft.descripcion
-                    : (list[0] ?? "");
-                  setDraft((d) => ({
-                    ...d,
-                    concepto,
-                    descripcion,
-                    socio: isPagoCuota(d.categoria, concepto) ? d.socio : "",
-                  }));
+              <Label className={LABEL_TECH}>Concepto principal</Label>
+              <Popover
+                open={conceptoComboboxOpen}
+                onOpenChange={(open) => {
+                  if (fieldsDisabled) return;
+                  setConceptoComboboxOpen(open);
                 }}
-                disabled={fieldsDisabled}
               >
-                <SelectTrigger>
-                  <SelectValue placeholder="Elegí concepto" />
-                </SelectTrigger>
-                <SelectContent>
-                  {draftConceptoList.map((c) => (
-                    <SelectItem key={c} value={c}>
-                      {c}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    tabIndex={0}
+                    disabled={fieldsDisabled || conceptosPrincipalesUnicos.length === 0}
+                    className="w-full justify-between border-zinc-800 bg-zinc-950 text-zinc-100"
+                  >
+                    {draft.concepto || "Seleccionar concepto"}
+                    <ChevronRight className="size-4 rotate-90 opacity-70" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                  <Command>
+                    <CommandInput placeholder="Buscar concepto..." />
+                    <CommandList>
+                      <CommandEmpty>No se encontraron conceptos.</CommandEmpty>
+                      <CommandGroup>
+                        {conceptosPrincipalesUnicos.map((concepto) => (
+                          <CommandItem
+                            key={String(concepto)}
+                            value={String(concepto)}
+                            onSelect={() => {
+                              const detalles = conceptosByCategoria.filter(
+                                (item) => item.concepto === concepto,
+                              );
+                              const debeAutoseleccionar = shouldAutoSelectDetalle(
+                                concepto,
+                                detalles,
+                              );
+                              const detalleDefault =
+                                debeAutoseleccionar && detalles.length > 0
+                                  ? detalles[0]
+                                  : null;
+                              setDraft((d) => ({
+                                ...d,
+                                concepto,
+                                conceptoId: detalleDefault?.id ?? "",
+                                descripcion: detalleDefault?.descripcion ?? "",
+                                socio: isPagoCuota(d.categoria, concepto) ? d.socio : "",
+                                socioId: isPagoCuota(d.categoria, concepto) ? d.socioId : "",
+                              }));
+                              setConceptoComboboxOpen(false);
+                            }}
+                          >
+                            <Check
+                              className={cn(
+                                "size-4",
+                                draft.concepto === concepto ? "opacity-100" : "opacity-0",
+                              )}
+                            />
+                            {concepto}
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+              {shouldShowValidationErrors && validationErrors.concepto ? (
+                <p className="text-red-500 text-sm">{validationErrors.concepto}</p>
+              ) : null}
             </div>
-            <div className="space-y-1.5">
-              <Label className={LABEL_TECH}>Descripción</Label>
-              <Select
-                value={
-                  draftDescList.includes(draft.descripcion)
-                    ? draft.descripcion
-                    : (draftDescList[0] ?? "")
-                }
-                onValueChange={(descripcion) =>
-                  setDraft((d) => ({ ...d, descripcion }))
-                }
-                disabled={draftDescList.length === 0 || fieldsDisabled}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Elegí descripción" />
-                </SelectTrigger>
-                <SelectContent>
-                  {draftDescList.map((dItem) => (
-                    <SelectItem key={dItem} value={dItem}>
-                      {dItem}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            {shouldRenderDetalleSelector ? (
+              <div className="space-y-1.5">
+                <Label className={LABEL_TECH}>Descripción / Detalle</Label>
+                <Popover
+                  open={detalleComboboxOpen}
+                  onOpenChange={(open) => {
+                    if (fieldsDisabled || !draft.concepto || autoDetalle) return;
+                    setDetalleComboboxOpen(open);
+                  }}
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      tabIndex={0}
+                      disabled={
+                        fieldsDisabled ||
+                        !draft.concepto ||
+                        autoDetalle ||
+                        detallesConceptoSeleccionado.length === 0
+                      }
+                      className="w-full justify-between border-zinc-800 bg-zinc-950 text-zinc-100"
+                    >
+                      {draft.descripcion || "Seleccionar detalle"}
+                      <ChevronRight className="size-4 rotate-90 opacity-70" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                    <Command>
+                      <CommandInput placeholder="Buscar descripción..." />
+                      <CommandList>
+                        <CommandEmpty>No se encontraron descripciones.</CommandEmpty>
+                        <CommandGroup>
+                          {detallesConceptoSeleccionado
+                            .filter((item) => item.id)
+                            .map((item) => {
+                              const descripcionLabel =
+                                item.descripcion && item.descripcion.trim().length > 0
+                                  ? item.descripcion
+                                  : "Sin descripción";
+                              return (
+                                <CommandItem
+                                  key={String(item.id)}
+                                  value={`${item.concepto} ${descripcionLabel}`}
+                                  onSelect={() => {
+                                    setDraft((d) => ({
+                                      ...d,
+                                      conceptoId: String(item.id),
+                                      descripcion: item.descripcion ?? "",
+                                    }));
+                                    setDetalleComboboxOpen(false);
+                                  }}
+                                >
+                                  <Check
+                                    className={cn(
+                                      "size-4",
+                                      draft.conceptoId === item.id
+                                        ? "opacity-100"
+                                        : "opacity-0",
+                                    )}
+                                  />
+                                  {descripcionLabel}
+                                </CommandItem>
+                              );
+                            })}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+                {shouldShowValidationErrors && validationErrors.detalle ? (
+                  <p className="text-red-500 text-sm">{validationErrors.detalle}</p>
+                ) : null}
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label className={LABEL_TECH}>Descripción / Detalle</Label>
+                <div className="rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-400">
+                  {draft.descripcion || "Detalle autoasignado"}
+                </div>
+              </div>
+            )}
             {isPagoCuota(draft.categoria, draft.concepto) ? (
               <div className="space-y-1.5">
                 <Label className={LABEL_TECH}>Socio</Label>
@@ -1344,10 +1725,12 @@ export default function AdministracionPage() {
                     <Button
                       type="button"
                       variant="outline"
+                      tabIndex={0}
                       disabled={fieldsDisabled}
                       className="w-full justify-between border-zinc-800 bg-zinc-950 text-zinc-100"
                     >
-                      {draft.socio || "Seleccionar socio"}
+                      {safeSociosOptions.find((s) => s.id === draft.socioId)?.nombre ||
+                        "Seleccionar socio"}
                       <ChevronRight className="size-4 rotate-90 opacity-70" />
                     </Button>
                   </PopoverTrigger>
@@ -1357,22 +1740,26 @@ export default function AdministracionPage() {
                       <CommandList>
                         <CommandEmpty>No se encontraron socios.</CommandEmpty>
                         <CommandGroup>
-                          {sociosCaja.map((socio) => (
+                          {safeSociosOptions.map((socio) => (
                             <CommandItem
-                              key={socio}
-                              value={socio}
+                              key={String(socio.id)}
+                              value={String(socio.nombre)}
                               onSelect={() => {
-                                setDraft((d) => ({ ...d, socio }));
+                                setDraft((d) => ({
+                                  ...d,
+                                  socioId: String(socio.id),
+                                  socio: socio.nombre,
+                                }));
                                 setSocioComboboxOpen(false);
                               }}
                             >
                               <Check
                                 className={cn(
                                   "size-4",
-                                  draft.socio === socio ? "opacity-100" : "opacity-0",
+                                  draft.socioId === socio.id ? "opacity-100" : "opacity-0",
                                 )}
                               />
-                              {socio}
+                              {socio.nombre}
                             </CommandItem>
                           ))}
                         </CommandGroup>
@@ -1380,34 +1767,50 @@ export default function AdministracionPage() {
                     </Command>
                   </PopoverContent>
                 </Popover>
+                {shouldShowValidationErrors && validationErrors.socioId ? (
+                  <p className="text-red-500 text-sm">{validationErrors.socioId}</p>
+                ) : null}
               </div>
             ) : null}
             <div className="space-y-1.5">
               <Label className={LABEL_TECH}>Forma de pago</Label>
               <Select
-                value={draft.formaPago || undefined}
-                onValueChange={(v) =>
-                  setDraft((d) => ({ ...d, formaPago: v }))
-                }
-                disabled={fieldsDisabled || formasPagoList.length === 0}
+                value={draft.formaPagoId || undefined}
+                onValueChange={(v) => {
+                  const selected = safeFormaPagoOptions.find(
+                    (item) => String(item.id) === String(v),
+                  );
+                  setDraft((d) => ({
+                    ...d,
+                    formaPagoId: String(v),
+                    formaPago: selected?.nombre ?? d.formaPago,
+                  }));
+                }}
+                disabled={fieldsDisabled || safeFormaPagoOptions.length === 0}
               >
-                <SelectTrigger>
+                <SelectTrigger tabIndex={0}>
                   <SelectValue
                     placeholder={
-                      formasPagoList.length === 0
+                      safeFormaPagoOptions.length === 0
                         ? "Configurá formas de pago en Configuración"
                         : undefined
                     }
                   />
                 </SelectTrigger>
                 <SelectContent>
-                  {formasPagoList.map((fp) => (
-                    <SelectItem key={fp} value={fp}>
-                      {fp}
+                  {safeFormaPagoOptions.map((fp) => (
+                    <SelectItem key={String(fp.id)} value={String(fp.id)}>
+                      {fp.nombre}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {shouldShowValidationErrors && validationErrors.formaPagoId ? (
+                <p className="text-red-500 text-sm">{validationErrors.formaPagoId}</p>
+              ) : null}
+              {shouldShowValidationErrors && validationErrors.formaPagoCatalog ? (
+                <p className="text-red-500 text-sm">{validationErrors.formaPagoCatalog}</p>
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="f-obs" className={LABEL_TECH}>
@@ -1437,7 +1840,7 @@ export default function AdministracionPage() {
                 }
                 disabled={fieldsDisabled}
               >
-                <SelectTrigger>
+                <SelectTrigger tabIndex={0}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1466,50 +1869,50 @@ export default function AdministracionPage() {
                 />
               </div>
             )}
-          </div>
+          </form>
 
           <SheetFooter className="border-t border-zinc-800/50 bg-card">
-            {sheetMode === "edit" && !isEditingMovimiento ? (
-              <Button
-                type="button"
-                variant="outline"
-                className="ml-auto border-zinc-700"
-                onClick={() => setSheetOpen(false)}
-              >
-                Cerrar
-              </Button>
+            {sheetMode === "edit" ? (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="border-zinc-700"
+                  onClick={() => setSheetOpen(false)}
+                >
+                  Cerrar
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="border-[#e41b68]/50 text-[#e41b68] hover:bg-[#e41b68]/10 hover:text-[#ff8fb8]"
+                  onClick={() => {
+                    const current = movimientos.find((m) => m.id === editingId);
+                    if (!current) return;
+                    setDeleteTarget(current);
+                    setDeleteDialogOpen(true);
+                  }}
+                >
+                  <Trash2 className="size-4" aria-hidden />
+                  Eliminar
+                </Button>
+              </>
             ) : (
               <>
                 <Button
                   type="button"
                   variant="outline"
                   className="border-zinc-700"
-                  onClick={() => {
-                    if (sheetMode === "edit" && editingId) {
-                      const original = movimientos.find((m) => m.id === editingId);
-                      if (original) setDraft(movimientoToDraft(original));
-                      setIsEditingMovimiento(false);
-                    } else {
-                      setSheetOpen(false);
-                    }
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setSheetOpen(false);
                   }}
                 >
                   Cancelar
                 </Button>
-                {sheetMode === "edit" ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="border-[#e41b68]/50 text-[#e41b68] hover:bg-[#e41b68]/10 hover:text-[#ff8fb8]"
-                    onClick={deleteMovimiento}
-                  >
-                    <Trash2 className="size-4" aria-hidden />
-                    Eliminar
-                  </Button>
-                ) : null}
                 <Button
-                  type="button"
-                  onClick={saveDraft}
+                  type="submit"
+                  form="movimiento-form"
                   disabled={saveDisabled}
                   className="bg-[#5ab253] font-semibold text-white hover:bg-[#5ab253]/90"
                 >
@@ -1520,6 +1923,39 @@ export default function AdministracionPage() {
           </SheetFooter>
         </SheetContent>
       </Sheet>
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent className="border-zinc-800 bg-zinc-950 text-zinc-100">
+          <DialogHeader>
+            <DialogTitle>Eliminar movimiento</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-zinc-400">
+            Esta accion eliminara definitivamente el movimiento seleccionado.
+          </p>
+          <DialogFooter className="gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-zinc-700"
+              onClick={() => {
+                setDeleteDialogOpen(false);
+                setDeleteTarget(null);
+              }}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              className="bg-[#e41b68] text-white hover:bg-[#e41b68]/90"
+              onClick={() => {
+                if (!deleteTarget) return;
+                void deleteMovimiento(deleteTarget);
+              }}
+            >
+              Eliminar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

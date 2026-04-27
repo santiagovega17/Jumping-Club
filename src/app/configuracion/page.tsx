@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import useSWR from "swr";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import {
   Accordion,
@@ -47,6 +48,7 @@ import {
   PAGE_TITLE_CLASS,
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
+import { toTitleCase } from "@/lib/text";
 import { toast } from "sonner";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import type { ConceptoCaja, FormaPago, PlantillaClase } from "@/types/database.types";
@@ -58,6 +60,7 @@ const BTN_FUCSIA =
   "bg-[#e41b68] font-semibold text-white hover:bg-[#e41b68]/90";
 const BTN_VERDE =
   "bg-[#5ab253] font-semibold text-white hover:bg-[#5ab253]/90";
+const CONCEPTO_PAGO_CUOTA = "Pago de Cuota";
 
 const STORAGE_KEY = "jumping-club-config-v1";
 
@@ -284,80 +287,102 @@ export default function ConfiguracionPage() {
   const [instructorEditNombre, setInstructorEditNombre] = useState("");
   const [instructorEditEspecialidad, setInstructorEditEspecialidad] =
     useState("");
+  const [plantillaDialogOpen, setPlantillaDialogOpen] = useState(false);
+  const [plantillaEditId, setPlantillaEditId] = useState<string | null>(null);
+  const [plantillaEditNombre, setPlantillaEditNombre] = useState("");
+  const [plantillaEditInstructorId, setPlantillaEditInstructorId] = useState("");
+  const [plantillaEditHorario, setPlantillaEditHorario] = useState("09:00");
+  const { data: adminContext } = useSWR(
+    "config-admin-context",
+    async () => {
+      const supabase = createSupabaseClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return null;
+      const { data: perfil, error: perfilError } = await supabase
+        .from("perfiles")
+        .select("franquicia_id")
+        .eq("id", user.id)
+        .single();
+      if (perfilError || !perfil?.franquicia_id) return null;
+      return { franquiciaId: perfil.franquicia_id };
+    },
+    { revalidateOnFocus: false, keepPreviousData: true },
+  );
 
-  const refreshFranquiciaData = useCallback(async (franquiciaId: string) => {
-    const supabase = createSupabaseClient();
-    const [planesRes, instRes, fpRes, ccRes, plRes] = await Promise.all([
-      supabase
-        .from("planes")
-        .select("id,nombre,precio,estado")
-        .eq("franquicia_id", franquiciaId)
-        .order("nombre", { ascending: true }),
-      supabase
-        .from("instructores")
-        .select("id,nombre,estado,especialidad")
-        .eq("franquicia_id", franquiciaId)
-        .order("nombre", { ascending: true }),
-      supabase
-        .from("formas_pago")
-        .select("*")
-        .eq("franquicia_id", franquiciaId)
-        .eq("activo", true)
-        .order("orden", { ascending: true })
-        .order("nombre", { ascending: true }),
-      supabase
-        .from("conceptos_caja")
-        .select("*")
-        .eq("franquicia_id", franquiciaId)
-        .order("orden", { ascending: true })
-        .order("concepto", { ascending: true })
-        .order("descripcion", { ascending: true }),
-      supabase
-        .from("plantillas_clases")
-        .select("*")
-        .eq("franquicia_id", franquiciaId)
-        .eq("activo", true)
-        .order("orden", { ascending: true })
-        .order("horario", { ascending: true }),
-    ]);
+  const {
+    data: franquiciaData,
+    isLoading: isLoadingConfigData,
+    mutate: mutateFranquiciaData,
+  } = useSWR(
+    adminContext?.franquiciaId ? ["config-data", adminContext.franquiciaId] : null,
+    async () => {
+      const franquiciaId = adminContext!.franquiciaId;
+      const supabase = createSupabaseClient();
+      const [planesRes, instRes, fpRes, ccRes, plRes] = await Promise.all([
+        supabase
+          .from("planes")
+          .select("id,nombre,precio,estado")
+          .eq("franquicia_id", franquiciaId)
+          .order("nombre", { ascending: true }),
+        supabase
+          .from("instructores")
+          .select("id,nombre,estado,especialidad")
+          .eq("franquicia_id", franquiciaId)
+          .order("nombre", { ascending: true }),
+        supabase
+          .from("formas_pago")
+          .select("*")
+          .eq("franquicia_id", franquiciaId)
+          .eq("activo", true)
+          .order("orden", { ascending: true })
+          .order("nombre", { ascending: true }),
+        supabase
+          .from("conceptos_caja")
+          .select("*")
+          .eq("franquicia_id", franquiciaId)
+          .order("orden", { ascending: true })
+          .order("concepto", { ascending: true })
+          .order("descripcion", { ascending: true }),
+        supabase
+          .from("plantillas_clases")
+          .select("*")
+          .eq("franquicia_id", franquiciaId)
+          .eq("activo", true)
+          .order("orden", { ascending: true })
+          .order("horario", { ascending: true }),
+      ]);
 
-    if (!planesRes.error && planesRes.data) {
-      setConfig((c) => ({
-        ...c,
-        pases: planesRes.data.map((p) => ({
-          id: p.id,
-          nombre: p.nombre,
-          precio: Math.round(Number(p.precio) || 0),
-          estado: p.estado,
-        })),
-      }));
-    }
-
-    if (!instRes.error && instRes.data) {
-      setInstructoresRows(
-        instRes.data.map((inst) => ({
-          id: inst.id,
-          nombre: inst.nombre,
-          especialidad: inst.especialidad?.trim() ?? "",
-        })),
-      );
-    } else {
-      setInstructoresRows([]);
-    }
-
-    if (!fpRes.error && fpRes.data) setFormasPagoRows(fpRes.data);
-    else setFormasPagoRows([]);
-
-    if (!ccRes.error && ccRes.data) {
-      setConceptosCajaRows(
-        ccRes.data.filter((row) => row.descripcion.trim().toLowerCase() !== "general"),
-      );
-    }
-    else setConceptosCajaRows([]);
-
-    if (!plRes.error && plRes.data) setPlantillasRows(plRes.data);
-    else setPlantillasRows([]);
-  }, []);
+      return {
+        franquiciaId,
+        pases:
+          !planesRes.error && planesRes.data
+            ? planesRes.data.map((p) => ({
+                id: p.id,
+                nombre: p.nombre,
+                precio: Math.round(Number(p.precio) || 0),
+                estado: p.estado,
+              }))
+            : [],
+        instructores:
+          !instRes.error && instRes.data
+            ? instRes.data.map((inst) => ({
+                id: inst.id,
+                nombre: inst.nombre,
+                especialidad: inst.especialidad?.trim() ?? "",
+              }))
+            : [],
+        formas: !fpRes.error && fpRes.data ? fpRes.data : [],
+        conceptos:
+          !ccRes.error && ccRes.data
+            ? ccRes.data.filter((row) => row.descripcion.trim().toLowerCase() !== "general")
+            : [],
+        plantillas: !plRes.error && plRes.data ? plRes.data : [],
+      };
+    },
+    { revalidateOnFocus: false, keepPreviousData: true },
+  );
 
   useEffect(() => {
     const loaded = parseStored(
@@ -378,30 +403,14 @@ export default function ConfiguracionPage() {
   }, [config, hydrated]);
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const supabase = createSupabaseClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) return;
-
-        const { data: perfil, error: perfilError } = await supabase
-          .from("perfiles")
-          .select("franquicia_id")
-          .eq("id", user.id)
-          .single();
-
-        if (perfilError || !perfil?.franquicia_id) return;
-        setAdminFranquiciaId(perfil.franquicia_id);
-        await refreshFranquiciaData(perfil.franquicia_id);
-      } catch {
-        /* ignore */
-      }
-    };
-
-    void load();
-  }, [refreshFranquiciaData]);
+    if (!franquiciaData) return;
+    setAdminFranquiciaId(franquiciaData.franquiciaId);
+    setConfig((c) => ({ ...c, pases: franquiciaData.pases }));
+    setInstructoresRows(franquiciaData.instructores);
+    setFormasPagoRows(franquiciaData.formas);
+    setConceptosCajaRows(franquiciaData.conceptos);
+    setPlantillasRows(franquiciaData.plantillas);
+  }, [franquiciaData]);
 
   const updateBlock = useCallback(
     (block: "manana" | "tarde", patch: Partial<BlockSchedule>) => {
@@ -450,12 +459,19 @@ export default function ConfiguracionPage() {
   );
 
   const plantillasFiltradas = useMemo(
-    () => plantillasRows.filter((tpl) => tpl.dia_semana === selectedDay),
+    () =>
+      plantillasRows.filter((tpl) => {
+        if (tpl.dia_semana !== selectedDay) return false;
+        const today = new Date().toISOString().slice(0, 10);
+        if (tpl.valid_from && tpl.valid_from > today) return false;
+        if (tpl.valid_to && tpl.valid_to < today) return false;
+        return true;
+      }),
     [plantillasRows, selectedDay],
   );
 
   const addPase = async () => {
-    const nombre = nuevoPaseNombre.trim();
+    const nombre = toTitleCase(nuevoPaseNombre.trim());
     const precio = Math.max(0, Math.round(Number(nuevoPasePrecio) || 0));
     if (!nombre) return;
     if (!adminFranquiciaId) {
@@ -477,7 +493,7 @@ export default function ConfiguracionPage() {
         return;
       }
 
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       setNuevoPaseNombre("");
       setNuevoPasePrecio("");
       toast.success("Plan creado correctamente");
@@ -499,7 +515,7 @@ export default function ConfiguracionPage() {
         toast.error(error.message);
         return;
       }
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Pase eliminado correctamente");
     } catch {
       toast.error("No se pudo eliminar el plan");
@@ -519,7 +535,7 @@ export default function ConfiguracionPage() {
         toast.error(error.message);
         return;
       }
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Plan restaurado correctamente");
     } catch {
       toast.error("No se pudo restaurar el plan");
@@ -527,7 +543,7 @@ export default function ConfiguracionPage() {
   };
 
   const addForma = async () => {
-    const t = nuevaForma.trim();
+    const t = toTitleCase(nuevaForma.trim());
     if (!t || !adminFranquiciaId) return;
     if (
       formasPagoRows.some((x) => x.nombre.toLowerCase() === t.toLowerCase())
@@ -550,7 +566,7 @@ export default function ConfiguracionPage() {
         return toast.error("Error al guardar la forma de pago");
       }
       setNuevaForma("");
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Forma de pago agregada correctamente");
     } catch (err) {
       const message =
@@ -571,7 +587,7 @@ export default function ConfiguracionPage() {
         toast.error(error.message);
         return;
       }
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Forma de pago eliminada correctamente");
     } catch {
       toast.error("No se pudo eliminar");
@@ -579,7 +595,7 @@ export default function ConfiguracionPage() {
   };
 
   const addConcepto = async (rama: "ingresos" | "egresos", nombre: string) => {
-    const t = nombre.trim();
+    const t = toTitleCase(nombre.trim());
     const tipo = rama === "ingresos" ? "ingreso" : "egreso";
     if (!t || !adminFranquiciaId) return;
     if (conceptosCajaRows.some((r) => r.tipo === tipo && r.concepto === t)) {
@@ -600,7 +616,7 @@ export default function ConfiguracionPage() {
       }
       if (rama === "ingresos") setNuevoConceptoIng("");
       else setNuevoConceptoEgr("");
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Concepto agregado correctamente");
     } catch {
       toast.error("No se pudo agregar el concepto");
@@ -611,6 +627,10 @@ export default function ConfiguracionPage() {
     rama: "ingresos" | "egresos",
     concepto: string,
   ) => {
+    if (concepto === CONCEPTO_PAGO_CUOTA) {
+      toast.error("Este concepto es del sistema y no se puede eliminar");
+      return;
+    }
     if (!adminFranquiciaId) return;
     const tipo = rama === "ingresos" ? "ingreso" : "egreso";
     try {
@@ -625,7 +645,7 @@ export default function ConfiguracionPage() {
         toast.error(error.message);
         return;
       }
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Concepto eliminado correctamente");
     } catch {
       toast.error("No se pudo eliminar el concepto");
@@ -637,7 +657,7 @@ export default function ConfiguracionPage() {
     concepto: string,
     draftKey: string,
   ) => {
-    const text = (descDrafts[draftKey] ?? "").trim();
+    const text = toTitleCase((descDrafts[draftKey] ?? "").trim());
     const tipo = rama === "ingresos" ? "ingreso" : "egreso";
     if (!text || !adminFranquiciaId) return;
     if (
@@ -664,7 +684,7 @@ export default function ConfiguracionPage() {
         return;
       }
       setDescDrafts((d) => ({ ...d, [draftKey]: "" }));
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Descripción agregada correctamente");
     } catch {
       toast.error("No se pudo agregar la descripción");
@@ -697,7 +717,7 @@ export default function ConfiguracionPage() {
         toast.error(error.message);
         return;
       }
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Descripción eliminada correctamente");
     } catch {
       toast.error("No se pudo eliminar");
@@ -705,7 +725,7 @@ export default function ConfiguracionPage() {
   };
 
   const addInstructor = async () => {
-    const nombre = nuevoInstructorNombre.trim();
+    const nombre = toTitleCase(nuevoInstructorNombre.trim());
     if (!nombre || !adminFranquiciaId) return;
     try {
       const supabase = createSupabaseClient();
@@ -713,7 +733,7 @@ export default function ConfiguracionPage() {
         franquicia_id: adminFranquiciaId,
         nombre,
         estado: "activo",
-        especialidad: nuevoInstructorEspecialidad.trim() || null,
+        especialidad: toTitleCase(nuevoInstructorEspecialidad.trim()) || null,
       });
       if (error) {
         toast.error(error.message);
@@ -721,7 +741,7 @@ export default function ConfiguracionPage() {
       }
       setNuevoInstructorNombre("");
       setNuevoInstructorEspecialidad("");
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Instructor agregado correctamente");
     } catch {
       toast.error("No se pudo agregar el instructor");
@@ -741,7 +761,7 @@ export default function ConfiguracionPage() {
         );
         return;
       }
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Instructor eliminado correctamente");
     } catch {
       toast.error("No se pudo eliminar el instructor");
@@ -757,7 +777,7 @@ export default function ConfiguracionPage() {
 
   const saveInstructorEdit = async () => {
     if (!instructorEditId || !adminFranquiciaId) return;
-    const nombre = instructorEditNombre.trim();
+    const nombre = toTitleCase(instructorEditNombre.trim());
     if (!nombre) return;
     try {
       const supabase = createSupabaseClient();
@@ -765,7 +785,7 @@ export default function ConfiguracionPage() {
         .from("instructores")
         .update({
           nombre,
-          especialidad: instructorEditEspecialidad.trim() || null,
+          especialidad: toTitleCase(instructorEditEspecialidad.trim()) || null,
         })
         .eq("id", instructorEditId)
         .eq("franquicia_id", adminFranquiciaId);
@@ -775,7 +795,7 @@ export default function ConfiguracionPage() {
       }
       setInstructorDialogOpen(false);
       setInstructorEditId(null);
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Instructor actualizado");
     } catch {
       toast.error("No se pudo guardar");
@@ -783,7 +803,7 @@ export default function ConfiguracionPage() {
   };
 
   const addClaseTemplate = async () => {
-    const nombre = nuevaClaseNombre.trim();
+    const nombre = toTitleCase(nuevaClaseNombre.trim());
     const horarioRaw = nuevaClaseHorario.trim().slice(0, 5);
     if (!nombre || !nuevaClaseInstructorId || !horarioRaw || !adminFranquiciaId)
       return;
@@ -800,6 +820,8 @@ export default function ConfiguracionPage() {
         instructor_id: nuevaClaseInstructorId,
         horario: horarioRaw,
         dia_semana: selectedDay,
+        valid_from: new Date().toISOString().slice(0, 10),
+        valid_to: null,
         orden: plantillasRows.length,
         activo: true,
       });
@@ -810,7 +832,7 @@ export default function ConfiguracionPage() {
       setNuevaClaseNombre("");
       setNuevaClaseInstructorId("");
       setNuevaClaseHorario("09:00");
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Plantilla guardada correctamente");
     } catch {
       toast.error("No se pudo guardar la plantilla");
@@ -829,10 +851,71 @@ export default function ConfiguracionPage() {
         toast.error(error.message);
         return;
       }
-      await refreshFranquiciaData(adminFranquiciaId);
+      await mutateFranquiciaData();
       toast.success("Plantilla eliminada correctamente");
     } catch {
       toast.error("No se pudo eliminar");
+    }
+  };
+
+  const openEditPlantilla = (tpl: PlantillaClase) => {
+    setPlantillaEditId(tpl.id);
+    setPlantillaEditNombre(tpl.nombre);
+    setPlantillaEditInstructorId(tpl.instructor_id);
+    setPlantillaEditHorario(tpl.horario);
+    setPlantillaDialogOpen(true);
+  };
+
+  const savePlantillaEdit = async () => {
+    if (!plantillaEditId || !adminFranquiciaId) return;
+    const nombre = toTitleCase(plantillaEditNombre.trim());
+    const horarioRaw = plantillaEditHorario.trim().slice(0, 5);
+    if (!nombre || !plantillaEditInstructorId || !horarioRaw) return;
+    const daySchedule = config.schedules[selectedDay];
+    if (!isInsideOpenSchedule(daySchedule, horarioRaw)) {
+      toast.error("El horario de la clase está fuera del horario de apertura del club");
+      return;
+    }
+    try {
+      const supabase = createSupabaseClient();
+      const today = new Date().toISOString().slice(0, 10);
+      const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+      const current = plantillasRows.find((tpl) => tpl.id === plantillaEditId);
+      if (!current) return;
+
+      const { error: closeError } = await supabase
+        .from("plantillas_clases")
+        .update({
+          valid_to: today,
+        })
+        .eq("id", plantillaEditId)
+        .eq("franquicia_id", adminFranquiciaId);
+      if (closeError) {
+        toast.error(closeError.message);
+        return;
+      }
+
+      const { error: createError } = await supabase.from("plantillas_clases").insert({
+        franquicia_id: adminFranquiciaId,
+        nombre,
+        instructor_id: plantillaEditInstructorId,
+        horario: horarioRaw,
+        dia_semana: current.dia_semana,
+        valid_from: tomorrow,
+        valid_to: null,
+        orden: current.orden ?? 0,
+        activo: true,
+      });
+      if (createError) {
+        toast.error(createError.message);
+        return;
+      }
+      setPlantillaDialogOpen(false);
+      setPlantillaEditId(null);
+      await mutateFranquiciaData();
+      toast.success("Plantilla actualizada correctamente");
+    } catch {
+      toast.error("No se pudo actualizar la plantilla");
     }
   };
 
@@ -948,7 +1031,7 @@ export default function ConfiguracionPage() {
                         type="button"
                         onClick={() => setPlanesVista(mode)}
                         className={cn(
-                          "rounded-md px-2.5 py-1 text-xs font-semibold capitalize transition-colors",
+                          "rounded-md px-2.5 py-1 text-xs font-semibold capitalize transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950",
                           planesVista === mode
                             ? "bg-[#e41b68]/20 text-[#ff8fb8]"
                             : "text-zinc-400 hover:text-zinc-200",
@@ -961,7 +1044,7 @@ export default function ConfiguracionPage() {
                 </div>
                 {pasesFiltrados.length === 0 ? (
                   <div className="rounded-xl border border-zinc-800/50 bg-zinc-950/50 py-8 text-center text-sm text-zinc-500">
-                    Sin registros.
+                    {isLoadingConfigData && !franquiciaData ? "Cargando..." : "Sin registros."}
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
@@ -1028,13 +1111,13 @@ export default function ConfiguracionPage() {
             <CardHeader>
               <PremiumCardTitle>Formas de pago</PremiumCardTitle>
               <CardDescription className="text-sm text-zinc-500">
-                Métodos aceptados en caja y administración. Agregá o quitá
+                Formas de pago aceptadas en caja y administración. Agregá o quitá
                 etiquetas según tu operación.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="rounded-xl border border-zinc-800/50 bg-zinc-950/50 p-4">
-                <p className={cn(LABEL_TECH, "mb-3")}>Agregar método</p>
+                <p className={cn(LABEL_TECH, "mb-3")}>Agregar forma de pago</p>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <Input
                     value={nuevaForma}
@@ -1053,16 +1136,18 @@ export default function ConfiguracionPage() {
                     onClick={() => void addForma()}
                   >
                     <Plus className="size-4" aria-hidden />
-                    Agregar método
+                    Agregar forma de pago
                   </Button>
                 </div>
               </div>
 
               <div>
-                <p className={cn(LABEL_TECH, "mb-3")}>Métodos configurados</p>
+                <p className={cn(LABEL_TECH, "mb-3")}>Formas de pago configuradas</p>
                 <div className="flex flex-wrap gap-2">
                   {formasPagoRows.length === 0 ? (
-                    <p className="text-sm text-zinc-500">Sin registros.</p>
+                    <p className="text-sm text-zinc-500">
+                      {isLoadingConfigData && !franquiciaData ? "Cargando..." : "Sin registros."}
+                    </p>
                   ) : (
                     formasPagoRows.map((fp) => (
                       <span
@@ -1072,7 +1157,7 @@ export default function ConfiguracionPage() {
                         {fp.nombre}
                         <button
                           type="button"
-                          className="rounded p-0.5 text-[#e41b68]/80 transition-colors hover:bg-[#e41b68]/15 hover:text-[#e41b68]"
+                          className="rounded p-0.5 text-[#e41b68]/80 transition-colors hover:bg-[#e41b68]/15 hover:text-[#e41b68] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
                           onClick={() => void removeForma(fp.id)}
                           aria-label={`Quitar ${fp.nombre}`}
                         >
@@ -1124,13 +1209,18 @@ export default function ConfiguracionPage() {
                     </Button>
                   </div>
                   {ingresosGrouped.length === 0 ? (
-                    <p className="text-sm text-zinc-500">Sin registros.</p>
+                    <p className="text-sm text-zinc-500">
+                      {isLoadingConfigData && !franquiciaData ? "Cargando..." : "Sin registros."}
+                    </p>
                   ) : (
                     <Accordion
                       type="multiple"
                       className="h-auto rounded-xl border border-zinc-800/50 bg-zinc-950/40 px-2"
                     >
                       {ingresosGrouped.map(([concepto, rows]) => (
+                        (() => {
+                          const isSystemConcept = concepto === CONCEPTO_PAGO_CUOTA;
+                          return (
                         <AccordionItem
                           key={concepto}
                           value={concepto}
@@ -1147,6 +1237,12 @@ export default function ConfiguracionPage() {
                               variant="ghost"
                               size="icon"
                               className="mt-2 shrink-0 self-start text-[#e41b68]/80 hover:bg-[#e41b68]/10 hover:text-[#e41b68]"
+                              disabled={isSystemConcept}
+                              title={
+                                isSystemConcept
+                                  ? "Este concepto es del sistema y no se puede eliminar"
+                                  : undefined
+                              }
                               onClick={(e) => {
                                 e.stopPropagation();
                                 void removeConcepto("ingresos", concepto);
@@ -1156,6 +1252,11 @@ export default function ConfiguracionPage() {
                               <Trash2 className="size-4" />
                             </Button>
                           </div>
+                          {isSystemConcept ? (
+                            <p className="px-1 pb-2 text-xs text-zinc-500">
+                              Este concepto es del sistema y no se puede eliminar.
+                            </p>
+                          ) : null}
                           <AccordionContent className="h-auto overflow-visible pb-4">
                             <div className="flex flex-wrap gap-2 pb-2">
                               {rows
@@ -1168,7 +1269,7 @@ export default function ConfiguracionPage() {
                                   {row.descripcion}
                                   <button
                                     type="button"
-                                    className="rounded p-0.5 text-zinc-500 hover:text-[#e41b68]"
+                                    className="rounded p-0.5 text-zinc-500 hover:text-[#e41b68] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
                                     onClick={() =>
                                       void removeDescripcionRow(row.id)
                                     }
@@ -1210,6 +1311,8 @@ export default function ConfiguracionPage() {
                             </div>
                           </AccordionContent>
                         </AccordionItem>
+                          );
+                        })()
                       ))}
                     </Accordion>
                   )}
@@ -1241,7 +1344,9 @@ export default function ConfiguracionPage() {
                     </Button>
                   </div>
                   {egresosGrouped.length === 0 ? (
-                    <p className="text-sm text-zinc-500">Sin registros.</p>
+                    <p className="text-sm text-zinc-500">
+                      {isLoadingConfigData && !franquiciaData ? "Cargando..." : "Sin registros."}
+                    </p>
                   ) : (
                     <Accordion
                       type="multiple"
@@ -1285,7 +1390,7 @@ export default function ConfiguracionPage() {
                                   {row.descripcion}
                                   <button
                                     type="button"
-                                    className="rounded p-0.5 text-zinc-500 hover:text-[#e41b68]"
+                                    className="rounded p-0.5 text-zinc-500 hover:text-[#e41b68] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
                                     onClick={() =>
                                       void removeDescripcionRow(row.id)
                                     }
@@ -1475,7 +1580,7 @@ export default function ConfiguracionPage() {
                       type="button"
                       onClick={() => setSelectedDay(id)}
                       className={cn(
-                        "rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
+                        "rounded-lg border px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950",
                         selectedDay === id
                           ? "border-[#e41b68] bg-[#e41b68]/15 text-[#ff8fb8]"
                           : "border-zinc-800/80 bg-zinc-950 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800/60",
@@ -1685,6 +1790,9 @@ export default function ConfiguracionPage() {
                       <TableHead className={LABEL_TECH}>Clase</TableHead>
                       <TableHead className={LABEL_TECH}>Instructor</TableHead>
                       <TableHead className={LABEL_TECH}>Horario</TableHead>
+                      <TableHead className="w-24 text-right">
+                        <span className="sr-only">Editar</span>
+                      </TableHead>
                       <TableHead className="w-12 text-right">
                         <span className="sr-only">Eliminar</span>
                       </TableHead>
@@ -1694,7 +1802,7 @@ export default function ConfiguracionPage() {
                     {plantillasFiltradas.length === 0 ? (
                       <TableRow className="border-zinc-800/50">
                         <TableCell
-                          colSpan={4}
+                          colSpan={5}
                           className="py-8 text-center text-sm text-zinc-500"
                         >
                           Sin registros.
@@ -1715,6 +1823,18 @@ export default function ConfiguracionPage() {
                           </TableCell>
                           <TableCell className="text-sm font-semibold text-zinc-200">
                             {tpl.horario}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                              onClick={() => openEditPlantilla(tpl)}
+                              aria-label={`Editar ${tpl.nombre}`}
+                            >
+                              <Pencil className="size-4" />
+                            </Button>
                           </TableCell>
                           <TableCell className="text-right">
                             <Button
@@ -1768,7 +1888,7 @@ export default function ConfiguracionPage() {
               />
             </div>
           </div>
-          <DialogFooter className="gap-2 sm:gap-0">
+          <DialogFooter className="flex flex-row justify-end gap-4">
             <Button
               type="button"
               variant="outline"
@@ -1781,6 +1901,82 @@ export default function ConfiguracionPage() {
               type="button"
               className={BTN_VERDE}
               onClick={() => void saveInstructorEdit()}
+            >
+              Guardar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={plantillaDialogOpen} onOpenChange={setPlantillaDialogOpen}>
+        <DialogContent className="border-zinc-800 bg-zinc-950 text-zinc-50 sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Editar plantilla</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-plantilla-nombre" className={LABEL_TECH}>
+                Nombre de la clase
+              </Label>
+              <Input
+                id="edit-plantilla-nombre"
+                value={plantillaEditNombre}
+                onChange={(e) => setPlantillaEditNombre(e.target.value)}
+                className="border-zinc-800 bg-zinc-900 text-zinc-100"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-plantilla-instructor" className={LABEL_TECH}>
+                Instructor
+              </Label>
+              <Select
+                value={plantillaEditInstructorId}
+                onValueChange={setPlantillaEditInstructorId}
+              >
+                <SelectTrigger
+                  id="edit-plantilla-instructor"
+                  className="border-zinc-800 bg-zinc-900 text-zinc-100"
+                >
+                  <SelectValue placeholder="Seleccionar instructor" />
+                </SelectTrigger>
+                <SelectContent className="border-zinc-800 bg-zinc-950 text-zinc-100">
+                  {instructoresRows.map((inst) => (
+                    <SelectItem key={inst.id} value={inst.id}>
+                      {inst.nombre}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-plantilla-horario" className={LABEL_TECH}>
+                Horario
+              </Label>
+              <Input
+                id="edit-plantilla-horario"
+                type="time"
+                value={plantillaEditHorario}
+                onChange={(e) => setPlantillaEditHorario(e.target.value)}
+                className="border-zinc-800 bg-zinc-900 text-zinc-100"
+              />
+            </div>
+            <p className="text-xs text-zinc-500">
+              Los cambios impactan en instancias futuras no sobreescritas en Calendario.
+            </p>
+          </div>
+          <DialogFooter className="flex flex-row justify-end gap-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-zinc-700"
+              onClick={() => setPlantillaDialogOpen(false)}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              className={BTN_VERDE}
+              onClick={() => void savePlantillaEdit()}
             >
               Guardar
             </Button>

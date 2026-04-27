@@ -6,11 +6,13 @@ import { usePathname } from "next/navigation";
 import {
   Calendar,
   LayoutDashboard,
+  LogOut,
   SlidersHorizontal,
   UserCircle,
   Users,
   Wallet,
 } from "lucide-react";
+import { signOut } from "@/actions/auth";
 import { BRAND_TITLE_CLASS } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 
@@ -42,6 +44,7 @@ type SidebarProps = {
 
 export function Sidebar({ className, fixed = true, onNavigate }: SidebarProps) {
   const pathname = usePathname();
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const [role, setRole] = useState<Role>(() => {
     if (typeof window === "undefined") return "admin";
     const storedRole = window.sessionStorage.getItem("userRole");
@@ -110,6 +113,31 @@ export function Sidebar({ className, fixed = true, onNavigate }: SidebarProps) {
           );
         })}
       </nav>
+      <form
+        action={signOut}
+        onSubmit={() => {
+          setIsSigningOut(true);
+          if (typeof window !== "undefined") {
+            window.sessionStorage.removeItem("userRole");
+            window.localStorage.removeItem("jumpingClubRole");
+          }
+          onNavigate?.();
+        }}
+      >
+        <button
+          type="submit"
+          disabled={isSigningOut}
+          className={cn(
+            "mt-2 flex w-full items-center gap-3 rounded-md border border-zinc-800 px-3 py-2.5 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-800 hover:text-zinc-50",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900",
+            isSigningOut && "cursor-not-allowed opacity-60",
+          )}
+          aria-label="Cerrar sesión"
+        >
+          <LogOut className="size-5 shrink-0" aria-hidden />
+          {isSigningOut ? "Cerrando sesión..." : "Cerrar sesión"}
+        </button>
+      </form>
     </aside>
   );
 }

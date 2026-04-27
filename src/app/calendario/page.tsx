@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import useSWR from "swr";
 import { CheckCircle2, Pencil, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Card,
   CardContent,
@@ -36,8 +38,17 @@ import {
   SHEET_HEADING_CLASS,
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
+import { toTitleCase } from "@/lib/text";
 import { toast } from "sonner";
+import { z } from "zod";
+import { es } from "date-fns/locale";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
+import {
+  getClaseHistorialAction,
+  getInscriptosPorClaseAction,
+  inscribirSocioEnClase,
+  updateClaseWithHistoryAction,
+} from "@/actions/clases";
 
 const capacidadTotal = 20;
 type Role = "administracion" | "socio";
@@ -58,6 +69,41 @@ type ClaseTemplateConfig = {
   instructorId: string;
   horario: string;
   diaSemana: DayId;
+  validFrom: string | null;
+  validTo: string | null;
+};
+
+type ClaseProgramada = {
+  id: string;
+  nombre: string;
+  instructorId: string;
+  fechaHora: string;
+  cupoMaximo: number;
+  reservasActuales: number;
+  estado: "activa" | "cancelada";
+};
+
+type ClaseRender = {
+  id: string;
+  source: "recurrente" | "especial";
+  classId: string | null;
+  nombre: string;
+  instructorId: string;
+  fechaHora: string;
+  cupoMaximo: number;
+  reservasActuales: number;
+  estado: "activa" | "cancelada";
+};
+
+type ClaseHistorialItem = {
+  id: string;
+  nombreAnterior: string;
+  instructorAnterior: string | null;
+  fechaHoraAnterior: string;
+  nombreNuevo: string;
+  instructorNuevo: string | null;
+  fechaHoraNuevo: string;
+  editadoEn: string | null;
 };
 
 type BlockSchedule = {
@@ -136,6 +182,39 @@ function toMinutes(hhmm: string): number {
   return h * 60 + m;
 }
 
+function getHorarioAperturaDia(
+  dayId: DayId | null,
+  schedules: Record<DayId, DaySchedule> | null,
+) {
+  const fallback = "08:00";
+  if (!dayId) return fallback;
+  const daySchedule = schedules?.[dayId];
+  if (!daySchedule) return fallback;
+  const aperturas = [daySchedule.manana, daySchedule.tarde]
+    .filter((b) => b.enabled)
+    .map((b) => b.inicio)
+    .sort((a, b) => toMinutes(a) - toMinutes(b));
+  return aperturas[0] ?? fallback;
+}
+
+function dateKeyFromDateTime(value: string) {
+  return value.slice(0, 10);
+}
+
+function timeValueFromDateTime(value: string) {
+  const t = value.slice(11, 16);
+  return /^\d{2}:\d{2}$/.test(t) ? t : "09:00";
+}
+
+function dayIdToWeekday(dayId: DayId) {
+  if (dayId === "lun") return 1;
+  if (dayId === "mar") return 2;
+  if (dayId === "mie") return 3;
+  if (dayId === "jue") return 4;
+  if (dayId === "vie") return 5;
+  return 6;
+}
+
 export default function CalendarioPage() {
   const diasSelector = useMemo(() => getDiasSelector(), []);
   const [role] = useState<Role>(() => {
@@ -146,19 +225,16 @@ export default function CalendarioPage() {
       : "administracion";
   });
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
-  const [selectedClase, setSelectedClase] = useState<string | null>(null);
-  const [inscripcionConfirmada, setInscripcionConfirmada] = useState(false);
+  const [selectedClaseId, setSelectedClaseId] = useState<string | null>(null);
   const [instructoresConfig, setInstructoresConfig] = useState<InstructorConfig[]>([]);
   const [clasesTemplateConfig, setClasesTemplateConfig] = useState<ClaseTemplateConfig[]>([]);
-  const [clasesExtraPorDia, setClasesExtraPorDia] = useState<Record<string, string[]>>({});
-  const [canceladosPorDia, setCanceladosPorDia] = useState<Record<string, string[]>>({});
-  const [inscriptosPorClase, setInscriptosPorClase] = useState<
-    Record<string, string[]>
-  >({});
-  const [cupoMaximoPorClase, setCupoMaximoPorClase] = useState<Record<string, number>>({});
-  const [detalleClasePorDia, setDetalleClasePorDia] = useState<
-    Record<string, Record<string, { nombre: string; instructorId: string }>>
-  >({});
+  const [adminFranquiciaId, setAdminFranquiciaId] = useState<string | null>(null);
+  const [clasesProgramadas, setClasesProgramadas] = useState<ClaseProgramada[]>([]);
+  const [clasesCanceladas, setClasesCanceladas] = useState<
+    Array<{ nombre: string; instructorId: string; fechaHora: string }>
+  >([]);
+  const [currentSocioId, setCurrentSocioId] = useState<string | null>(null);
+  const [currentSocioEstado, setCurrentSocioEstado] = useState<string | null>(null);
 
   const [classSheetOpen, setClassSheetOpen] = useState(false);
   const [classSheetContext, setClassSheetContext] = useState<ClassSheetContext | null>(
@@ -168,7 +244,16 @@ export default function CalendarioPage() {
   const [sheetCupo, setSheetCupo] = useState(String(capacidadTotal));
   const [sheetNombreClase, setSheetNombreClase] = useState("");
   const [sheetInstructorId, setSheetInstructorId] = useState("");
+  const [editingClaseId, setEditingClaseId] = useState<string | null>(null);
+  const [isSavingClase, setIsSavingClase] = useState(false);
   const [schedulesConfig, setSchedulesConfig] = useState<Record<DayId, DaySchedule> | null>(null);
+  const [claseHistorial, setClaseHistorial] = useState<ClaseHistorialItem[]>([]);
+  const [loadingHistorial, setLoadingHistorial] = useState(false);
+  const [classSubmitError, setClassSubmitError] = useState<string | null>(null);
+  const [classSubmitAttempted, setClassSubmitAttempted] = useState(false);
+  const [classFieldErrors, setClassFieldErrors] = useState<
+    Partial<Record<"nombre" | "instructorId" | "hora", string>>
+  >({});
 
   const selectedDateKey = selectedDate.toISOString().slice(0, 10);
   const selectedDayId = weekdayToDayId(selectedDate.getDay());
@@ -187,76 +272,139 @@ export default function CalendarioPage() {
     }
   }, []);
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const supabase = createSupabaseClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) return;
-        const { data: perfil } = await supabase
-          .from("perfiles")
-          .select("franquicia_id")
-          .eq("id", user.id)
-          .single();
-        if (!perfil?.franquicia_id) return;
+  const { data: calendarContext, error: calendarContextError } = useSWR(
+    "calendario-context",
+    async () => {
+      const supabase = createSupabaseClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return null;
+      const { data: perfil } = await supabase
+        .from("perfiles")
+        .select("franquicia_id")
+        .eq("id", user.id)
+        .single();
+      if (!perfil?.franquicia_id) return null;
+      const { data: instRows } = await supabase
+        .from("instructores")
+        .select("id,nombre")
+        .eq("franquicia_id", perfil.franquicia_id)
+        .order("nombre", { ascending: true });
+      const { data: socioRow } = await supabase
+        .from("socios")
+        .select("id,estado")
+        .eq("perfil_id", user.id)
+        .maybeSingle();
 
-        const { data: instRows } = await supabase
-          .from("instructores")
-          .select("id,nombre")
-          .eq("franquicia_id", perfil.franquicia_id)
-          .order("nombre", { ascending: true });
-
-        setInstructoresConfig(
+      return {
+        franquiciaId: perfil.franquicia_id,
+        socioId: socioRow?.id ?? null,
+        socioEstado: socioRow?.estado ?? null,
+        instructores:
           (instRows ?? [])
             .filter((x) => x.id && x.nombre)
-            .map((x) => ({ id: x.id, nombre: x.nombre })),
-        );
+            .map((x) => ({ id: x.id, nombre: x.nombre })) as InstructorConfig[],
+      };
+    },
+    { revalidateOnFocus: false, keepPreviousData: true },
+  );
 
-        const { data: tplRows } = await supabase
+  useEffect(() => {
+    if (!calendarContext) return;
+    setAdminFranquiciaId(calendarContext.franquiciaId);
+    setCurrentSocioId(calendarContext.socioId);
+    setCurrentSocioEstado(calendarContext.socioEstado);
+    setInstructoresConfig(calendarContext.instructores);
+  }, [calendarContext]);
+
+  const {
+    data: calendarData,
+    isLoading: isLoadingCalendar,
+    error: calendarDataError,
+    mutate: mutateCalendar,
+  } = useSWR(
+    adminFranquiciaId
+      ? ["calendario-data", adminFranquiciaId, selectedDate.getFullYear(), selectedDate.getMonth()]
+      : null,
+    async () => {
+      const supabase = createSupabaseClient();
+      const firstDay = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1);
+      const lastDay = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0);
+      const from = `${firstDay.toISOString().slice(0, 10)}T00:00:00`;
+      const to = `${lastDay.toISOString().slice(0, 10)}T23:59:59`;
+      const [{ data: tplRows }, { data: claseRows }, { data: canceladasRows }] = await Promise.all([
+        supabase
           .from("plantillas_clases")
-          .select("id,nombre,instructor_id,horario,dia_semana")
-          .eq("franquicia_id", perfil.franquicia_id)
+          .select("id,nombre,instructor_id,horario,dia_semana,valid_from,valid_to")
+          .eq("franquicia_id", adminFranquiciaId)
           .eq("activo", true)
-          .order("horario", { ascending: true });
+          .order("horario", { ascending: true }),
+        supabase
+          .from("clases")
+          .select("id,nombre,instructor_id,fecha_hora,cupo_maximo,reservas_actuales,estado")
+          .eq("franquicia_id", adminFranquiciaId)
+          .eq("estado", "activa")
+          .gte("fecha_hora", from)
+          .lte("fecha_hora", to)
+          .order("fecha_hora", { ascending: true }),
+        supabase
+          .from("clases")
+          .select("nombre,instructor_id,fecha_hora")
+          .eq("franquicia_id", adminFranquiciaId)
+          .eq("estado", "cancelada")
+          .gte("fecha_hora", from)
+          .lte("fecha_hora", to),
+      ]);
 
-        setClasesTemplateConfig(
-          (tplRows ?? [])
-            .filter(
-              (x) =>
-                x.id &&
-                x.nombre &&
-                x.instructor_id &&
-                x.horario &&
-                DAY_IDS.includes((x.dia_semana ?? "") as DayId),
-            )
-            .map((x) => ({
-              id: x.id,
-              nombre: x.nombre,
-              instructorId: x.instructor_id,
-              horario: x.horario,
-              diaSemana: x.dia_semana as DayId,
-            })),
-        );
-      } catch {
-        setInstructoresConfig([]);
-        setClasesTemplateConfig([]);
-      }
-    };
-    void load();
-  }, []);
+      return {
+        templates: (tplRows ?? [])
+          .filter(
+            (x) =>
+              x.id &&
+              x.nombre &&
+              x.instructor_id &&
+              x.horario &&
+              DAY_IDS.includes((x.dia_semana ?? "") as DayId),
+          )
+          .map((x) => ({
+            id: x.id,
+            nombre: x.nombre,
+            instructorId: x.instructor_id,
+            horario: x.horario,
+            diaSemana: x.dia_semana as DayId,
+            validFrom: x.valid_from ?? null,
+            validTo: x.valid_to ?? null,
+          })),
+        programadas: (claseRows ?? []).map((row) => ({
+          id: row.id,
+          nombre: row.nombre ?? "",
+          instructorId: row.instructor_id ?? "",
+          fechaHora: row.fecha_hora,
+          cupoMaximo: row.cupo_maximo ?? capacidadTotal,
+          reservasActuales: row.reservas_actuales ?? 0,
+          estado: (row.estado as "activa" | "cancelada") ?? "activa",
+        })),
+        canceladas: (canceladasRows ?? []).map((row) => ({
+          nombre: row.nombre ?? "",
+          instructorId: row.instructor_id ?? "",
+          fechaHora: row.fecha_hora,
+        })),
+      };
+    },
+    { revalidateOnFocus: false, keepPreviousData: true },
+  );
 
-  const clasesBase = useMemo(() => {
-    if (!selectedDayId || clasesTemplateConfig.length === 0) return [];
-    return [
-      ...new Set(
-        clasesTemplateConfig
-          .filter((tpl) => tpl.diaSemana === selectedDayId)
-          .map((tpl) => tpl.horario),
-      ),
-    ].sort();
-  }, [clasesTemplateConfig, selectedDayId]);
+  useEffect(() => {
+    if (!calendarData) return;
+    setClasesTemplateConfig(calendarData.templates);
+    setClasesProgramadas(calendarData.programadas);
+    setClasesCanceladas(calendarData.canceladas);
+  }, [calendarData]);
+
+  const reloadCalendarData = useCallback(async () => {
+    await mutateCalendar();
+  }, [mutateCalendar]);
 
   const instructorNombreById = useMemo(
     () => Object.fromEntries(instructoresConfig.map((inst) => [inst.id, inst.nombre])),
@@ -276,214 +424,428 @@ export default function CalendarioPage() {
     [clasesTemplateConfig, selectedDayId],
   );
 
-  const clasesActivasDelDia = useMemo(() => {
-    const extras = clasesExtraPorDia[selectedDateKey] ?? [];
-    const cancelados = canceladosPorDia[selectedDateKey] ?? [];
-    return [...clasesBase, ...extras].filter((h) => !cancelados.includes(h));
-  }, [canceladosPorDia, clasesExtraPorDia, selectedDateKey]);
-
-  const cuposPorClase = useMemo(() => {
-    return clasesActivasDelDia.map((hora) => {
-      const max = cupoMaximoPorClase[hora] ?? capacidadTotal;
-      const lista = inscriptosPorClase[hora] ?? [];
-      const ocupados = Math.min(max, lista.length);
-      return { hora, max, ocupados };
-    });
-  }, [clasesActivasDelDia, cupoMaximoPorClase, inscriptosPorClase]);
-
-  const getClaseInfo = (hora: string, dateKey: string) => {
-    const override = detalleClasePorDia[dateKey]?.[hora];
-    if (override) return override;
-    const template = clasesTemplateConfig.find(
-      (tpl) => tpl.horario === hora && tpl.diaSemana === selectedDayId,
-    );
-    if (template) {
-      return { nombre: template.nombre, instructorId: template.instructorId };
-    }
-    return { nombre: "", instructorId: "" };
-  };
-
-  const clasesProgramadasMes = useMemo(() => {
+  const clasesRenderMes = useMemo(() => {
     const month = selectedDate.getMonth();
     const year = selectedDate.getFullYear();
-    let total = 0;
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const recurrentes: ClaseRender[] = [];
+    const especiales: ClaseRender[] = [];
 
-    for (let day = 1; day <= daysInMonth; day++) {
-      const key = new Date(year, month, day).toISOString().slice(0, 10);
-      const extras = clasesExtraPorDia[key]?.length ?? 0;
-      const cancelados = canceladosPorDia[key]?.length ?? 0;
-      total += clasesBase.length + extras - cancelados;
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    for (const tpl of clasesTemplateConfig) {
+      const targetWeekday = dayIdToWeekday(tpl.diaSemana);
+      for (let day = 1; day <= daysInMonth; day++) {
+        const d = new Date(year, month, day);
+        if (d.getDay() !== targetWeekday) continue;
+        const dateKey = d.toISOString().slice(0, 10);
+        if (tpl.validFrom && tpl.validFrom > dateKey) continue;
+        if (tpl.validTo && tpl.validTo < dateKey) continue;
+        const hhmm = horaToTimeValue(tpl.horario);
+        recurrentes.push({
+          id: `tpl-${tpl.id}-${dateKey}-${hhmm}`,
+          source: "recurrente",
+          classId: null,
+          nombre: tpl.nombre,
+          instructorId: tpl.instructorId,
+          fechaHora: `${dateKey}T${hhmm}:00`,
+          cupoMaximo: capacidadTotal,
+          reservasActuales: 0,
+          estado: "activa",
+        });
+      }
     }
-    return total;
-  }, [canceladosPorDia, clasesExtraPorDia, selectedDate]);
+
+    for (const clase of clasesProgramadas) {
+      especiales.push({
+        id: clase.id,
+        source: "especial",
+        classId: clase.id,
+        nombre: clase.nombre,
+        instructorId: clase.instructorId,
+        fechaHora: clase.fechaHora,
+        cupoMaximo: clase.cupoMaximo ?? capacidadTotal,
+        reservasActuales: clase.reservasActuales ?? 0,
+        estado: clase.estado,
+      });
+    }
+
+    const sameSlotAndIdentity = (a: ClaseRender, b: ClaseRender) =>
+      a.fechaHora === b.fechaHora &&
+      a.nombre === b.nombre &&
+      a.instructorId === b.instructorId;
+
+    for (const c of clasesCanceladas) {
+      const idx = recurrentes.findIndex(
+        (r) =>
+          r.fechaHora === c.fechaHora &&
+          r.nombre === c.nombre &&
+          r.instructorId === c.instructorId,
+      );
+      if (idx >= 0) recurrentes.splice(idx, 1);
+    }
+
+    for (const esp of especiales) {
+      if (esp.estado === "cancelada") {
+        const idx = recurrentes.findIndex((r) => sameSlotAndIdentity(r, esp));
+        if (idx >= 0) recurrentes.splice(idx, 1);
+      } else {
+        const idx = recurrentes.findIndex((r) => sameSlotAndIdentity(r, esp));
+        if (idx >= 0) recurrentes[idx] = esp;
+      }
+    }
+
+    const merged = [
+      ...recurrentes,
+      ...especiales.filter(
+        (esp) =>
+          esp.estado !== "cancelada" &&
+          !recurrentes.some((r) => sameSlotAndIdentity(r, esp)),
+      ),
+    ];
+
+    return merged.sort((a, b) => a.fechaHora.localeCompare(b.fechaHora));
+  }, [clasesCanceladas, clasesProgramadas, clasesTemplateConfig, selectedDate]);
+
+  const clasesActivasDelDia = useMemo(
+    () =>
+      clasesRenderMes
+        .filter((clase) => clase.estado !== "cancelada")
+        .filter((clase) => dateKeyFromDateTime(clase.fechaHora) === selectedDateKey)
+        .sort((a, b) => timeValueFromDateTime(a.fechaHora).localeCompare(timeValueFromDateTime(b.fechaHora))),
+    [clasesRenderMes, selectedDateKey],
+  );
+
+  const cuposPorClase = useMemo(
+    () =>
+      clasesActivasDelDia.map((clase) => {
+        const max = clase.cupoMaximo ?? capacidadTotal;
+        const ocupados = Math.min(max, Math.max(clase.reservasActuales, 0));
+        return {
+          id: clase.id,
+          source: clase.source,
+          classId: clase.classId,
+          fechaHora: clase.fechaHora,
+          hora: timeValueFromDateTime(clase.fechaHora),
+          max,
+          ocupados,
+          nombre: clase.nombre,
+          instructorId: clase.instructorId,
+        };
+      }),
+    [clasesActivasDelDia],
+  );
+  const horaInicioVisual = useMemo(
+    () => getHorarioAperturaDia(selectedDayId, schedulesConfig),
+    [schedulesConfig, selectedDayId],
+  );
+  const cuposPorClaseVisibles = useMemo(
+    () => cuposPorClase.filter((c) => toMinutes(c.hora) >= toMinutes(horaInicioVisual)),
+    [cuposPorClase, horaInicioVisual],
+  );
+
+  const clasesProgramadasMes = useMemo(() => {
+    return clasesRenderMes.length;
+  }, [clasesRenderMes]);
 
   const cuposLibresTotal = useMemo(
     () => cuposPorClase.reduce((acc, c) => acc + Math.max(0, c.max - c.ocupados), 0),
     [cuposPorClase],
   );
+  const selectedClase = useMemo(
+    () => cuposPorClase.find((c) => c.id === selectedClaseId) ?? null,
+    [cuposPorClase, selectedClaseId],
+  );
+  const {
+    data: inscriptosClaseData,
+    isLoading: isLoadingInscriptosClase,
+    error: inscriptosError,
+    mutate: mutateInscriptosClase,
+  } = useSWR(
+    selectedClase?.classId ? ["clase-inscriptos", selectedClase.classId] : null,
+    async () => {
+      const result = await getInscriptosPorClaseAction(selectedClase!.classId!);
+      if (!result.ok) throw new Error(result.error);
+      return result.data;
+    },
+    { revalidateOnFocus: false, keepPreviousData: true },
+  );
 
   const closeClassSheet = () => {
     setClassSheetOpen(false);
     setClassSheetContext(null);
+    setEditingClaseId(null);
+    setClassSubmitAttempted(false);
+    setClassFieldErrors({});
+    setClassSubmitError(null);
   };
 
   const openNewClassSheet = () => {
     setClassSheetContext("new");
+    setEditingClaseId(null);
     const tpl = clasesTemplateConfig[0];
-    setSheetHora(tpl?.horario ?? "14:00");
+    const horaBase = tpl?.horario ?? horaInicioVisual;
+    setSheetHora(
+      toMinutes(horaBase) < toMinutes(horaInicioVisual) ? horaInicioVisual : horaBase,
+    );
     setSheetCupo(String(capacidadTotal));
     setSheetNombreClase(tpl?.nombre ?? "");
     setSheetInstructorId(tpl?.instructorId ?? "");
+    setClassSubmitAttempted(false);
+    setClassFieldErrors({});
+    setClassSubmitError(null);
     setClassSheetOpen(true);
   };
 
   const openEditClassSheet = () => {
-    if (!selectedClase) return;
+    if (!selectedClase || !selectedClase.classId) {
+      toast.error("Selecciona una instancia real de clase para editar");
+      return;
+    }
     setClassSheetContext("edit");
-    setSheetHora(horaToTimeValue(selectedClase));
-    setSheetCupo(
-      String(cupoMaximoPorClase[selectedClase] ?? capacidadTotal),
-    );
-    const info = getClaseInfo(selectedClase, selectedDateKey);
-    setSheetNombreClase(info.nombre);
-    setSheetInstructorId(info.instructorId);
+    setEditingClaseId(selectedClase.classId);
+    setSheetHora(selectedClase.hora);
+    setSheetCupo(String(selectedClase.max ?? capacidadTotal));
+    setSheetNombreClase(selectedClase.nombre);
+    setSheetInstructorId(selectedClase.instructorId);
+    setClassSubmitAttempted(false);
+    setClassFieldErrors({});
+    setClassSubmitError(null);
     setClassSheetOpen(true);
   };
 
-  const onSelectClase = (hora: string) => {
-    setSelectedClase(hora);
-    setInscripcionConfirmada(false);
+  const onSelectClase = (claseId: string) => {
+    setSelectedClaseId(claseId);
   };
+
+  useEffect(() => {
+    const loadHistorial = async () => {
+      if (!classSheetOpen || classSheetContext !== "edit" || !selectedClase || !adminFranquiciaId) {
+        setClaseHistorial([]);
+        return;
+      }
+      const claseId = selectedClase.classId;
+      if (!claseId) {
+        setClaseHistorial([]);
+        return;
+      }
+      setLoadingHistorial(true);
+      const result = await getClaseHistorialAction({
+        claseId,
+        franquiciaId: adminFranquiciaId,
+      });
+      setLoadingHistorial(false);
+      if (!result.ok) {
+        setClaseHistorial([]);
+        return;
+      }
+      setClaseHistorial(
+        result.rows.map((r) => ({
+          id: r.id,
+          nombreAnterior: r.nombre_anterior,
+          instructorAnterior: r.instructor_id_anterior,
+          fechaHoraAnterior: r.fecha_hora_anterior,
+          nombreNuevo: r.nombre_nuevo,
+          instructorNuevo: r.instructor_id_nuevo,
+          fechaHoraNuevo: r.fecha_hora_nuevo,
+          editadoEn: r.editado_en,
+        })),
+      );
+    };
+    void loadHistorial();
+  }, [adminFranquiciaId, classSheetContext, classSheetOpen, selectedClase]);
 
   const onConfirmar = () => {
-    if (!selectedClase) return;
-    setInscripcionConfirmada(true);
-    toast.success("Inscripción confirmada correctamente");
+    if (!selectedClase || !adminFranquiciaId || !currentSocioId || !selectedClase.classId) {
+      toast.error("No se pudo identificar la clase para inscribirte");
+      return;
+    }
+    const confirmarInscripcion = async () => {
+      const result = await inscribirSocioEnClase({
+        claseId: selectedClase.classId,
+        socioId: currentSocioId,
+      });
+      if (!result.ok) {
+        toast.error(result.error || "No se pudo confirmar la inscripción");
+        return;
+      }
+      await reloadCalendarData();
+      await mutateInscriptosClase();
+      toast.success("Inscripción confirmada correctamente");
+    };
+    void confirmarInscripcion();
   };
 
+  const socioEstaInhabilitado = useMemo(() => {
+    const estado = String(currentSocioEstado ?? "").toLowerCase();
+    return estado === "vencido" || estado === "inactivo";
+  }, [currentSocioEstado]);
+
+  const socioYaIncriptoEnClase = useMemo(() => {
+    if (!currentSocioId) return false;
+    return (inscriptosClaseData ?? []).some((item) => item.socioId === currentSocioId);
+  }, [currentSocioId, inscriptosClaseData]);
+
+  const claseSinCupo = useMemo(() => {
+    if (!selectedClase) return false;
+    return selectedClase.ocupados >= selectedClase.max;
+  }, [selectedClase]);
+
+  const estadoBotonInscripcion = useMemo<
+    "ya-inscripto" | "cupo-lleno" | "socio-inhabilitado" | "ok"
+  >(() => {
+    if (socioYaIncriptoEnClase) return "ya-inscripto";
+    if (claseSinCupo) return "cupo-lleno";
+    if (socioEstaInhabilitado) return "socio-inhabilitado";
+    return "ok";
+  }, [claseSinCupo, socioEstaInhabilitado, socioYaIncriptoEnClase]);
+
   const confirmarClaseSheet = () => {
+    if (isSavingClase) return;
+    setClassSubmitAttempted(true);
+    setClassSubmitError(null);
+    setClassFieldErrors({});
     const hRaw = sheetHora.trim();
     const nombreClase = sheetNombreClase.trim();
-    if (!hRaw || !nombreClase || !sheetInstructorId) return;
-    const h = horaToTimeValue(hRaw);
+    const daySchedule = selectedDayId ? schedulesConfig?.[selectedDayId] : null;
+    const classSchema = z
+      .object({
+        nombre: z.string().trim().min(1, "Completá el nombre de la clase."),
+        instructorId: z.string().trim().min(1, "Seleccioná un instructor."),
+        hora: z
+          .string()
+          .trim()
+          .regex(/^\d{2}:\d{2}$/, "Ingresá una hora válida (HH:mm)."),
+      })
+      .superRefine(({ hora }, ctx) => {
+        const parsedTime = horaToTimeValue(hora);
+        const start = toMinutes(parsedTime);
+        const end = start + 60;
+        const turnoMananaInicio = toMinutes("07:00");
+        const turnoMananaFin = toMinutes("13:00");
+        const turnoTardeInicio = toMinutes("15:00");
+        const turnoTardeFin = toMinutes("21:00");
+        const isWithinOpening =
+          (start >= turnoMananaInicio && end <= turnoMananaFin) ||
+          (start >= turnoTardeInicio && end <= turnoTardeFin);
+
+        if (!isWithinOpening) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["hora"],
+            message:
+              "El horario debe estar entre las 07:00 y 13:00, o entre las 15:00 y 21:00.",
+          });
+        }
+      });
+    const parsed = classSchema.safeParse({
+      nombre: nombreClase,
+      instructorId: sheetInstructorId,
+      hora: hRaw,
+    });
+    if (!parsed.success) {
+      const nextErrors: Partial<Record<"nombre" | "instructorId" | "hora", string>> = {};
+      const flattened = parsed.error.flatten().fieldErrors;
+      if (flattened.nombre?.[0]) nextErrors.nombre = flattened.nombre[0];
+      if (flattened.instructorId?.[0]) nextErrors.instructorId = flattened.instructorId[0];
+      if (flattened.hora?.[0]) nextErrors.hora = flattened.hora[0];
+      setClassFieldErrors(nextErrors);
+      return;
+    }
+
+    const h = horaToTimeValue(parsed.data.hora);
     const cupo = Math.min(60, Math.max(1, Math.round(Number(sheetCupo) || capacidadTotal)));
 
-    const daySchedule = selectedDayId ? schedulesConfig?.[selectedDayId] : null;
-    const hasOpenBlocks =
-      !!daySchedule && (daySchedule.manana.enabled || daySchedule.tarde.enabled);
-    const start = toMinutes(h);
-    const end = start + 60;
-    const isWithinOpening =
-      !!daySchedule &&
-      [daySchedule.manana, daySchedule.tarde]
-        .filter((b) => b.enabled)
-        .some((b) => start >= toMinutes(b.inicio) && end <= toMinutes(b.fin));
-
-    if (!hasOpenBlocks || !isWithinOpening) {
-      toast.error("El horario de la clase está fuera del horario de apertura del club");
-      return;
-    }
-
-    if (classSheetContext === "new") {
-      if (clasesActivasDelDia.includes(h)) {
-        return;
-      }
-      setClasesExtraPorDia((prev) => ({
-        ...prev,
-        [selectedDateKey]: [...(prev[selectedDateKey] ?? []), h],
-      }));
-      setCupoMaximoPorClase((prev) => ({ ...prev, [h]: cupo }));
-      setInscriptosPorClase((prev) => ({ ...prev, [h]: prev[h] ?? [] }));
-      setDetalleClasePorDia((prev) => ({
-        ...prev,
-        [selectedDateKey]: {
-          ...(prev[selectedDateKey] ?? {}),
-          [h]: { nombre: nombreClase, instructorId: sheetInstructorId },
-        },
-      }));
-      closeClassSheet();
-      toast.success("Clase creada correctamente");
-      return;
-    }
-
-    if (classSheetContext === "edit" && selectedClase) {
-      const prevHora = selectedClase;
-      const ocuparOtra = (lista: string[]) =>
-        lista.filter((x) => x !== prevHora).includes(h);
-
-      if (h !== prevHora && ocuparOtra(clasesActivasDelDia)) {
-        return;
-      }
-
-      if (h !== prevHora) {
-        const extras = [...(clasesExtraPorDia[selectedDateKey] ?? [])];
-        const inExtras = extras.includes(prevHora);
-        const isBase = (clasesBase as readonly string[]).includes(prevHora);
-
-        if (inExtras) {
-          const idx = extras.indexOf(prevHora);
-          const next = [...extras];
-          next[idx] = h;
-          setClasesExtraPorDia((p) => ({ ...p, [selectedDateKey]: next }));
-        } else if (isBase) {
-          setCanceladosPorDia((p) => ({
-            ...p,
-            [selectedDateKey]: [...(p[selectedDateKey] ?? []), prevHora],
-          }));
-          setClasesExtraPorDia((p) => ({
-            ...p,
-            [selectedDateKey]: [...(p[selectedDateKey] ?? []), h],
-          }));
+    const fechaHora = `${selectedDateKey}T${h}:00`;
+    const save = async () => {
+      if (!adminFranquiciaId) return;
+      setIsSavingClase(true);
+      try {
+        const supabase = createSupabaseClient();
+        if (classSheetContext === "new") {
+          const { error } = await supabase.from("clases").insert({
+            nombre: toTitleCase(nombreClase),
+            franquicia_id: adminFranquiciaId,
+            instructor_id: sheetInstructorId,
+            fecha_hora: fechaHora,
+            cupo_maximo: cupo,
+            reservas_actuales: 0,
+            estado: "activa",
+          });
+          if (error) {
+            toast.error("No se pudo guardar la clase");
+            return;
+          }
+          toast.success("Clase creada correctamente");
+        } else if (classSheetContext === "edit" && selectedClase) {
+          let error: { message?: string } | null = null;
+          if (editingClaseId) {
+            const res = await updateClaseWithHistoryAction({
+              claseId: editingClaseId,
+              franquiciaId: adminFranquiciaId,
+              nombre: toTitleCase(nombreClase),
+              instructorId: sheetInstructorId,
+              fechaHora,
+              cupoMaximo: cupo,
+            });
+            error = res.ok ? null : { message: res.error };
+          } else {
+            const res = await supabase.from("clases").insert({
+              nombre: toTitleCase(nombreClase),
+              franquicia_id: adminFranquiciaId,
+              instructor_id: sheetInstructorId,
+              fecha_hora: fechaHora,
+              cupo_maximo: cupo,
+              reservas_actuales: 0,
+              estado: "activa",
+            });
+            error = res.error;
+          }
+          if (error) {
+            setClassSubmitError(error.message ?? "No se pudo editar la clase");
+            toast.error("No se pudo editar la clase");
+            return;
+          }
+          toast.success("Clase editada correctamente");
         }
-
-        setInscriptosPorClase((prev) => {
-          const lista = prev[prevHora] ?? [];
-          const { [prevHora]: _removed, ...rest } = prev;
-          return { ...rest, [h]: lista };
-        });
-        setCupoMaximoPorClase((prev) => {
-          const { [prevHora]: _c, ...rest } = prev;
-          return { ...rest, [h]: cupo };
-        });
-        setSelectedClase(h);
-        setDetalleClasePorDia((prev) => {
-          const dayData = { ...(prev[selectedDateKey] ?? {}) };
-          const prevInfo = dayData[prevHora];
-          if (prevInfo) delete dayData[prevHora];
-          dayData[h] = { nombre: nombreClase, instructorId: sheetInstructorId };
-          return { ...prev, [selectedDateKey]: dayData };
-        });
-      } else {
-        setCupoMaximoPorClase((prev) => ({ ...prev, [prevHora]: cupo }));
-        setDetalleClasePorDia((prev) => ({
-          ...prev,
-          [selectedDateKey]: {
-            ...(prev[selectedDateKey] ?? {}),
-            [prevHora]: { nombre: nombreClase, instructorId: sheetInstructorId },
-          },
-        }));
+        await reloadCalendarData();
+        setEditingClaseId(null);
+        closeClassSheet();
+      } finally {
+        setIsSavingClase(false);
       }
-    }
-
-    closeClassSheet();
-    toast.success("Clase editada correctamente");
+    };
+    void save();
   };
 
   const cancelarClaseSeleccionada = () => {
-    if (!selectedClase) return;
-    const horaCancelada = selectedClase;
-    setCanceladosPorDia((prev) => ({
-      ...prev,
-      [selectedDateKey]: [...(prev[selectedDateKey] ?? []), horaCancelada],
-    }));
-    setDetalleClasePorDia((prev) => {
-      const dayData = { ...(prev[selectedDateKey] ?? {}) };
-      delete dayData[horaCancelada];
-      return { ...prev, [selectedDateKey]: dayData };
-    });
-    setSelectedClase(null);
-    toast.success("Clase cancelada correctamente");
+    if (!selectedClase || !selectedClase.classId) {
+      toast.error("Selecciona una instancia real de clase para cancelar");
+      return;
+    }
+    const reservas = Math.max(0, selectedClase.ocupados);
+    const shouldContinue =
+      reservas > 0
+        ? window.confirm(
+            `Esta clase tiene ${reservas} reservas. Si la eliminas, se cancelarán las reservas de los socios. ¿Deseas continuar?`,
+          )
+        : true;
+    if (!shouldContinue) return;
+    const remove = async () => {
+      const supabase = createSupabaseClient();
+      let error: { message?: string } | null = null;
+      const res = await supabase
+        .from("clases")
+        .update({ estado: "cancelada" })
+        .eq("id", selectedClase.classId);
+      error = res.error;
+      if (error) {
+        toast.error("No se pudo cancelar la clase");
+        return;
+      }
+      await reloadCalendarData();
+      setSelectedClaseId(null);
+      toast.success("Clase cancelada correctamente");
+    };
+    void remove();
   };
 
   const sheetTitleText =
@@ -494,6 +856,12 @@ export default function CalendarioPage() {
       <h1 className={cn(PAGE_TITLE_CLASS, "mb-8")}>Calendario de Clases</h1>
 
       {role === "administracion" ? (
+        <>
+          {calendarContextError || calendarDataError ? (
+            <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              No se pudieron cargar los datos del calendario.
+            </div>
+          ) : null}
         <section className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
           <article className="rounded-2xl border border-zinc-800/50 bg-card p-4">
             <p className={KPI_TITLE_CLASS}>Clases del día</p>
@@ -514,6 +882,7 @@ export default function CalendarioPage() {
             </p>
           </article>
         </section>
+        </>
       ) : null}
 
       {role === "socio" ? (
@@ -527,11 +896,10 @@ export default function CalendarioPage() {
                   type="button"
                   onClick={() => {
                     setSelectedDate(dia.date);
-                    setSelectedClase(null);
-                    setInscripcionConfirmada(false);
+                    setSelectedClaseId(null);
                   }}
                   className={cn(
-                    "rounded-xl border px-3 py-2 text-center transition-all",
+                    "rounded-xl border px-3 py-2 text-center transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950",
                     selected
                       ? "border-primary bg-primary/20 text-primary ring-2 ring-primary/40 shadow-[0_0_24px_hsl(337_81%_50%_/_0.24)]"
                       : "border-white/10 bg-black/10 text-foreground/85 hover:bg-white/5"
@@ -566,12 +934,12 @@ export default function CalendarioPage() {
               <div className="flex w-full justify-center">
                 <Calendar
                   mode="single"
+                  locale={es}
                   selected={selectedDate}
                   onSelect={(date) => {
                     if (!date) return;
                     setSelectedDate(date);
-                    setSelectedClase(null);
-                    setInscripcionConfirmada(false);
+                    setSelectedClaseId(null);
                   }}
                   className="rounded-xl border border-white/10 bg-black/15"
                   classNames={{
@@ -598,23 +966,26 @@ export default function CalendarioPage() {
           </div>
 
           <div className="mt-5 flex w-full flex-col gap-3">
-            {cuposPorClase.length === 0 ? (
+            {isLoadingCalendar && !calendarData ? (
+              <div className="space-y-2">
+                <Skeleton className="h-20 w-full bg-zinc-800" />
+                <Skeleton className="h-20 w-full bg-zinc-800" />
+              </div>
+            ) : cuposPorClaseVisibles.length === 0 ? (
               <p className="rounded-xl border border-dashed border-white/10 bg-black/10 px-4 py-8 text-center text-sm text-foreground/55">
-                No hay clases programadas para este día. Configurá plantillas en
-                Configuración o agregá una clase con el botón correspondiente.
+                No hay clases programadas para este día. Configurá plantillas en Configuración o agregá una clase con el botón correspondiente.
               </p>
             ) : null}
-            {cuposPorClase.map(({ hora, max, ocupados }) => {
-              const isSelected = selectedClase === hora;
+            {cuposPorClaseVisibles.map(({ id, hora, max, ocupados, nombre, instructorId }) => {
+              const isSelected = selectedClaseId === id;
               const porcentaje = max > 0 ? Math.min(100, Math.round((ocupados / max) * 100)) : 0;
-              const info = getClaseInfo(hora, selectedDateKey);
               return (
                 <button
-                  key={hora}
+                  key={id}
                   type="button"
-                  onClick={() => onSelectClase(hora)}
+                  onClick={() => onSelectClase(id)}
                   className={cn(
-                    "flex w-full cursor-pointer flex-row items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 text-left transition-colors hover:bg-zinc-800/80",
+                    "flex w-full cursor-pointer flex-row items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 text-left transition-colors hover:bg-zinc-800/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950",
                     isSelected &&
                       "border-primary ring-2 ring-primary/45 shadow-[0_0_0_1px_hsl(337_81%_50%)]"
                   )}
@@ -628,12 +999,11 @@ export default function CalendarioPage() {
                     >
                       {hora}
                     </p>
+                    <p className="text-sm font-semibold text-zinc-100">
+                      {nombre.trim() ? nombre : "Sin nombre"}
+                    </p>
                     <p className="text-sm text-zinc-400">
-                      {info.nombre.trim()
-                        ? info.nombre
-                        : "Sin nombre"}{" "}
-                      •{" "}
-                      {instructorNombreById[info.instructorId] ?? "Sin instructor"}
+                      {instructorNombreById[instructorId] ?? "Sin instructor"}
                     </p>
                   </div>
                   <div className="flex min-w-[80px] flex-col items-end gap-2">
@@ -656,33 +1026,49 @@ export default function CalendarioPage() {
             <div className="mt-7">
               <Button
                 onClick={onConfirmar}
-                disabled={inscripcionConfirmada}
+                disabled={estadoBotonInscripcion !== "ok"}
                 className={cn(
                   "h-11 w-full text-base font-semibold",
-                  inscripcionConfirmada
-                    ? "border border-secondary bg-secondary/10 text-secondary opacity-100 hover:bg-secondary/10"
-                    : "bg-secondary text-secondary-foreground hover:bg-secondary/90"
+                  estadoBotonInscripcion === "ok" &&
+                    "bg-secondary text-secondary-foreground hover:bg-secondary/90",
+                  estadoBotonInscripcion === "ya-inscripto" &&
+                    "border border-secondary bg-secondary/10 text-secondary opacity-100 hover:bg-secondary/10",
+                  estadoBotonInscripcion === "cupo-lleno" &&
+                    "bg-zinc-700 text-zinc-300 hover:bg-zinc-700",
+                  estadoBotonInscripcion === "socio-inhabilitado" &&
+                    "bg-zinc-700 text-zinc-300 hover:bg-zinc-700",
                 )}
               >
-                {inscripcionConfirmada ? (
+                {estadoBotonInscripcion === "ya-inscripto" ? (
                   <>
                     <CheckCircle2 className="size-4" aria-hidden />
-                    Inscripción Confirmada
+                    Ya inscripto
                   </>
+                ) : estadoBotonInscripcion === "cupo-lleno" ? (
+                  "Cupo lleno"
+                ) : estadoBotonInscripcion === "socio-inhabilitado" ? (
+                  "Socio inhabilitado"
                 ) : (
                   "Confirmar Inscripción"
                 )}
               </Button>
+              {estadoBotonInscripcion === "socio-inhabilitado" ? (
+                <p className="mt-3 text-sm text-red-400">
+                  No se puede inscribir porque su cuota está vencida o pendiente de pago.
+                </p>
+              ) : null}
               <p
                 className={cn(
                   "mt-3 flex items-center gap-2 text-sm",
-                  inscripcionConfirmada ? "text-secondary" : "text-foreground/65"
+                  estadoBotonInscripcion === "ya-inscripto"
+                    ? "text-secondary"
+                    : "text-foreground/65"
                 )}
               >
-                {inscripcionConfirmada ? (
+                {estadoBotonInscripcion === "ya-inscripto" ? (
                   <>
                     <CheckCircle2 className="size-4" aria-hidden />
-                    Te anotaste a la clase de las {selectedClase}.
+                    Te anotaste a la clase de las {selectedClase.hora}.
                   </>
                 ) : (
                   "Confirma para reservar tu lugar en este horario."
@@ -696,7 +1082,7 @@ export default function CalendarioPage() {
               <Button
                 type="button"
                 onClick={openEditClassSheet}
-                disabled={!selectedClase}
+                disabled={!selectedClaseId}
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 <Pencil className="size-4" aria-hidden />
@@ -705,7 +1091,7 @@ export default function CalendarioPage() {
               <Button
                 type="button"
                 onClick={cancelarClaseSeleccionada}
-                disabled={!selectedClase}
+                disabled={!selectedClaseId}
                 variant="outline"
                 className="border-primary/55 text-primary hover:bg-primary/10 hover:text-primary"
               >
@@ -718,7 +1104,7 @@ export default function CalendarioPage() {
                 onClick={openNewClassSheet}
               >
                 <Plus className="size-4" aria-hidden />
-                Nueva Clase
+                Crear clase
               </Button>
             </div>
           ) : null}
@@ -731,21 +1117,35 @@ export default function CalendarioPage() {
             </div>
 
             <div className="mt-4">
-              {selectedClase ? (
-                (inscriptosPorClase[selectedClase] ?? []).length > 0 ? (
+              {selectedClaseId ? (
+                selectedClase?.classId ? (
+                  isLoadingInscriptosClase ? (
+                    <p className="rounded-lg border border-white/10 bg-black/10 px-3 py-3 text-sm text-foreground/70">
+                      Cargando inscriptos...
+                    </p>
+                  ) : inscriptosError ? (
+                    <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-3 text-sm text-red-200">
+                      No se pudo cargar el listado de inscriptos.
+                    </p>
+                  ) : (inscriptosClaseData ?? []).length > 0 ? (
                   <ul className="space-y-2">
-                    {(inscriptosPorClase[selectedClase] ?? []).map((nombre) => (
+                    {(inscriptosClaseData ?? []).map((item) => (
                       <li
-                        key={nombre}
+                        key={item.socioId}
                         className="rounded-lg border border-white/10 bg-black/10 px-3 py-2 text-sm"
                       >
-                        {nombre}
+                        {item.nombre}
                       </li>
                     ))}
                   </ul>
                 ) : (
                   <p className="rounded-lg border border-white/10 bg-black/10 px-3 py-3 text-sm text-foreground/70">
                     No hay socios anotados todavía.
+                  </p>
+                  )
+                ) : (
+                  <p className="rounded-lg border border-white/10 bg-black/10 px-3 py-3 text-sm text-foreground/70">
+                    Esta instancia aún no tiene registro persistido.
                   </p>
                 )
               ) : (
@@ -775,10 +1175,15 @@ export default function CalendarioPage() {
                 {classSheetContext === "edit"
                   ? "Modificá nombre, instructor, hora y cupo máximo de la clase seleccionada."
                   : "Definí nombre, instructor, horario y cupo máximo para la nueva clase del día seleccionado."}
+                {" "}
+                Los cambios permanentes de la serie se realizan desde Configuración.
               </SheetDescription>
             </SheetHeader>
 
             <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-1 py-6">
+              {classSubmitError ? (
+                <p className="text-sm text-red-500">{classSubmitError}</p>
+              ) : null}
               <div className="space-y-1.5">
                 <Label htmlFor="sheet-clase" className={LABEL_TECH}>
                   Nombre de la clase
@@ -807,6 +1212,9 @@ export default function CalendarioPage() {
                     className="border-zinc-800 bg-zinc-900 text-zinc-100"
                   />
                 )}
+                {classSubmitAttempted && classFieldErrors.nombre ? (
+                  <p className="text-sm text-red-500">{classFieldErrors.nombre}</p>
+                ) : null}
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="sheet-instructor" className={LABEL_TECH}>
@@ -827,19 +1235,36 @@ export default function CalendarioPage() {
                     ))}
                   </SelectContent>
                 </Select>
+                {classSubmitAttempted && classFieldErrors.instructorId ? (
+                  <p className="text-sm text-red-500">{classFieldErrors.instructorId}</p>
+                ) : null}
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="sheet-hora" className={LABEL_TECH}>
                   Hora
                 </Label>
-                <Input
-                  id="sheet-hora"
-                  type="time"
-                  step={1800}
-                  value={sheetHora}
-                  onChange={(e) => setSheetHora(e.target.value)}
-                  className="border-zinc-800 bg-zinc-900 text-zinc-100"
-                />
+                {classSheetContext === "edit" ? (
+                  <div className="rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-400">
+                    {sheetHora}
+                  </div>
+                ) : (
+                  <Input
+                    id="sheet-hora"
+                    type="time"
+                    step={1800}
+                    value={sheetHora}
+                    onChange={(e) => setSheetHora(e.target.value)}
+                    className="border-zinc-800 bg-zinc-900 text-zinc-100"
+                  />
+                )}
+                {classSheetContext === "edit" ? (
+                  <p className="text-sm text-zinc-500 italic">
+                    El horario no se puede modificar. Para cambiarlo, cancela esta clase y crea una nueva.
+                  </p>
+                ) : null}
+                {classSubmitAttempted && classFieldErrors.hora ? (
+                  <p className="text-sm text-red-500">{classFieldErrors.hora}</p>
+                ) : null}
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="sheet-cupo" className={LABEL_TECH}>
@@ -855,6 +1280,43 @@ export default function CalendarioPage() {
                   className="border-zinc-800 bg-zinc-900 text-zinc-100"
                 />
               </div>
+            {classSheetContext === "edit" ? (
+              <div className="space-y-2 border-t border-zinc-800/50 pt-4">
+                <p className={LABEL_TECH}>Historial de cambios</p>
+                {loadingHistorial ? (
+                  <p className="text-sm text-zinc-500">Cargando historial...</p>
+                ) : claseHistorial.length === 0 ? (
+                  <p className="text-sm text-zinc-500">Sin registros anteriores.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {claseHistorial.map((h) => {
+                      const when = h.editadoEn
+                        ? new Intl.DateTimeFormat("es-AR", {
+                            day: "2-digit",
+                            month: "2-digit",
+                            year: "numeric",
+                          }).format(new Date(h.editadoEn))
+                        : "—";
+                      const instructorAntes =
+                        (h.instructorAnterior && instructorNombreById[h.instructorAnterior]) ||
+                        "Sin instructor";
+                      const instructorDespues =
+                        (h.instructorNuevo && instructorNombreById[h.instructorNuevo]) ||
+                        "Sin instructor";
+                      return (
+                        <li
+                          key={h.id}
+                          className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-300"
+                        >
+                          El {when}, el instructor cambió de "{instructorAntes}" a "
+                          {instructorDespues}" ({h.nombreAnterior} {timeValueFromDateTime(h.fechaHoraAnterior)} {"->"} {h.nombreNuevo} {timeValueFromDateTime(h.fechaHoraNuevo)}).
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            ) : null}
             </div>
 
             <SheetFooter className="flex flex-row flex-wrap justify-end gap-2 border-t border-zinc-800/50 bg-card pt-4">
@@ -869,12 +1331,12 @@ export default function CalendarioPage() {
               <Button
                 type="button"
                 onClick={confirmarClaseSheet}
-                disabled={!sheetNombreClase.trim() || !sheetInstructorId}
+                disabled={!sheetNombreClase.trim() || !sheetInstructorId || isSavingClase}
                 className="bg-[#5ab253] font-semibold text-white hover:bg-[#5ab253]/90"
               >
-                {classSheetContext === "edit"
+                {classSheetContext === "edit" || editingClaseId
                   ? "Guardar cambios"
-                  : "Confirmar clase"}
+                  : "Crear clase"}
               </Button>
             </SheetFooter>
           </SheetContent>

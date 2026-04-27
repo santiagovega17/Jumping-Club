@@ -122,6 +122,24 @@
   * {
     @apply border-border outline-ring/50;
   }
+  :where(
+      button,
+      [type="button"],
+      [type="submit"],
+      [type="reset"],
+      a,
+      input,
+      select,
+      textarea,
+      [role="button"],
+      [data-slot="select-trigger"],
+      [data-slot="popover-trigger"],
+      [data-slot="dialog-trigger"],
+      [data-slot="dropdown-menu-trigger"],
+      [data-slot="tabs-trigger"]
+    ):focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-zinc-950;
+  }
   body {
     @apply min-h-full bg-zinc-950 text-foreground antialiased;
   }
