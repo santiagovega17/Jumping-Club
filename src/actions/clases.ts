@@ -187,10 +187,10 @@ export async function inscribirSocioEnClase(input: InscribirSocioEnClaseInput) {
 
     if (!inscripcionComoAdmin) {
       const estadoSocio = String(socio.estado ?? "").toLowerCase();
-      if (estadoSocio === "vencido" || estadoSocio === "inactivo") {
+      if (estadoSocio === "inactivo") {
         return {
           ok: false as const,
-          error: "No se puede inscribir porque su cuota está vencida o pendiente de pago.",
+          error: "No se puede inscribir porque el socio está inactivo.",
         };
       }
     }

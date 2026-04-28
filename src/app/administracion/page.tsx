@@ -192,6 +192,8 @@ type FormaPagoOption = {
 type SocioOption = {
   id: string;
   nombre: string;
+  planPrecio: number;
+  fechaAlta: string;
 };
 
 type CajaDataCache = {
@@ -232,6 +234,13 @@ function isoToDisplay(iso: string) {
   if (!iso || iso.length < 10) return "—";
   const [y, mo, d] = iso.split("-");
   return `${d}/${mo}/${y}`;
+}
+
+function timestampToDisplay(iso: string) {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString("es-AR");
 }
 
 function emptyDraftFrom(
@@ -320,6 +329,8 @@ export default function AdministracionPage() {
   const [quickSettleOpen, setQuickSettleOpen] = useState(false);
   const [quickSettleTarget, setQuickSettleTarget] = useState<Movimiento | null>(null);
   const [quickSettleFormaPagoId, setQuickSettleFormaPagoId] = useState("");
+  const [quickSettleMonto, setQuickSettleMonto] = useState(0);
+  const [quickSettleObservaciones, setQuickSettleObservaciones] = useState("");
   const [isQuickSettling, setIsQuickSettling] = useState(false);
   const [busquedaCobrosPendientes, setBusquedaCobrosPendientes] = useState("");
   const [busquedaEgresosPendientes, setBusquedaEgresosPendientes] = useState("");
@@ -383,7 +394,7 @@ export default function AdministracionPage() {
               .order("nombre", { ascending: true }),
             supabase
               .from("socios")
-              .select("id,perfil:perfiles(nombre)")
+              .select("id,perfil:perfiles(nombre,created_at),plan:planes(precio)")
               .eq("franquicia_id", perfilAdmin.franquicia_id),
           ]);
 
@@ -409,9 +420,15 @@ export default function AdministracionPage() {
 
         const sociosParsed = ((sociosRows ?? []) as Array<{
           id: string;
-          perfil?: { nombre?: string | null } | null;
+          perfil?: { nombre?: string | null; created_at?: string | null } | null;
+          plan?: { precio?: number | null } | null;
         }>)
-          .map((row) => ({ id: row.id, nombre: row.perfil?.nombre ?? "Sin nombre" }))
+          .map((row) => ({
+            id: row.id,
+            nombre: row.perfil?.nombre ?? "Sin nombre",
+            planPrecio: Number(row.plan?.precio ?? 0),
+            fechaAlta: row.perfil?.created_at ?? "",
+          }))
           .sort((a, b) => a.nombre.localeCompare(b.nombre));
         setSociosOptions(sociosParsed);
       } catch {
@@ -844,12 +861,23 @@ export default function AdministracionPage() {
       ),
     [sociosOptions],
   );
+  const quickSettleSocio = useMemo(
+    () => safeSociosOptions.find((socio) => socio.id === quickSettleTarget?.socioId),
+    [quickSettleTarget?.socioId, safeSociosOptions],
+  );
 
   const openQuickSettle = useCallback((movimiento: Movimiento) => {
+    const socio = safeSociosOptions.find((item) => item.id === movimiento.socioId);
     setQuickSettleTarget(movimiento);
     setQuickSettleFormaPagoId(movimiento.formaPagoId || safeFormaPagoOptions[0]?.id || "");
+    setQuickSettleMonto(
+      Number.isFinite(Number(socio?.planPrecio))
+        ? Math.max(0, Number(socio?.planPrecio ?? 0))
+        : Math.abs(Number(movimiento.monto ?? 0)),
+    );
+    setQuickSettleObservaciones(movimiento.observaciones ?? "");
     setQuickSettleOpen(true);
-  }, [safeFormaPagoOptions]);
+  }, [safeFormaPagoOptions, safeSociosOptions]);
 
   const confirmQuickSettle = useCallback(async () => {
     if (!currentUserId || !quickSettleTarget?.id) {
@@ -866,6 +894,8 @@ export default function AdministracionPage() {
         userId: currentUserId,
         movimientoId: quickSettleTarget.id,
         formaPagoId: quickSettleFormaPagoId,
+        montoPagado: quickSettleMonto,
+        observaciones: quickSettleObservaciones,
       });
       if (!result.ok) {
         toast.error(result.error ?? "No se pudo actualizar el estado del movimiento");
@@ -874,12 +904,21 @@ export default function AdministracionPage() {
       setQuickSettleOpen(false);
       setQuickSettleTarget(null);
       setQuickSettleFormaPagoId("");
+      setQuickSettleMonto(0);
+      setQuickSettleObservaciones("");
       await mutateCaja();
       toast.success("Movimiento marcado como pagado");
     } finally {
       setIsQuickSettling(false);
     }
-  }, [currentUserId, mutateCaja, quickSettleFormaPagoId, quickSettleTarget]);
+  }, [
+    currentUserId,
+    mutateCaja,
+    quickSettleFormaPagoId,
+    quickSettleMonto,
+    quickSettleObservaciones,
+    quickSettleTarget,
+  ]);
   const fieldsDisabled = sheetMode === "edit";
   const shouldShowValidationErrors = hasTriedSubmitMovimiento;
 
@@ -2218,6 +2257,8 @@ export default function AdministracionPage() {
           if (!open) {
             setQuickSettleTarget(null);
             setQuickSettleFormaPagoId("");
+            setQuickSettleMonto(0);
+            setQuickSettleObservaciones("");
           }
         }}
       >
@@ -2227,25 +2268,65 @@ export default function AdministracionPage() {
               {quickSettleTarget?.categoria === "Ingreso" ? "Cobrar pendiente" : "Pagar pendiente"}
             </DialogTitle>
           </DialogHeader>
-          <div className="space-y-2">
-            <p className="text-sm text-zinc-400">
-              Seleccioná la forma de pago para marcar el movimiento como pagado.
-            </p>
-            <Select
-              value={quickSettleFormaPagoId || undefined}
-              onValueChange={setQuickSettleFormaPagoId}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Seleccionar forma de pago" />
-              </SelectTrigger>
-              <SelectContent>
-                {safeFormaPagoOptions.map((fp) => (
-                  <SelectItem key={String(fp.id)} value={String(fp.id)}>
-                    {fp.nombre}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <div className="space-y-3">
+            {quickSettleTarget?.categoria === "Ingreso" ? (
+              <div className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-sm">
+                <p className="text-zinc-200">
+                  <span className="text-zinc-400">Monto del pase: </span>
+                  {formatPesos(quickSettleSocio?.planPrecio ?? 0)}
+                </p>
+                <p className="mt-1 text-zinc-200">
+                  <span className="text-zinc-400">Fecha en la que se unió: </span>
+                  {timestampToDisplay(quickSettleSocio?.fechaAlta ?? "")}
+                </p>
+              </div>
+            ) : null}
+            <div className="space-y-1.5">
+              <Label htmlFor="quick-settle-monto" className={LABEL_TECH}>
+                Monto a pagar
+              </Label>
+              <Input
+                id="quick-settle-monto"
+                type="number"
+                min={0}
+                step={1}
+                value={quickSettleMonto}
+                onChange={(e) =>
+                  setQuickSettleMonto(Math.max(0, Number(e.target.value) || 0))
+                }
+                className="border-zinc-800 bg-zinc-950 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className={LABEL_TECH}>Forma de pago</Label>
+              <Select
+                value={quickSettleFormaPagoId || undefined}
+                onValueChange={setQuickSettleFormaPagoId}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Seleccionar forma de pago" />
+                </SelectTrigger>
+                <SelectContent>
+                  {safeFormaPagoOptions.map((fp) => (
+                    <SelectItem key={String(fp.id)} value={String(fp.id)}>
+                      {fp.nombre}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="quick-settle-observaciones" className={LABEL_TECH}>
+                Observaciones
+              </Label>
+              <Textarea
+                id="quick-settle-observaciones"
+                value={quickSettleObservaciones}
+                onChange={(e) => setQuickSettleObservaciones(e.target.value)}
+                className="border-zinc-800 bg-zinc-950"
+                placeholder="Detalle opcional del cobro"
+              />
+            </div>
           </div>
           <DialogFooter className="gap-2">
             <Button
@@ -2256,6 +2337,8 @@ export default function AdministracionPage() {
                 setQuickSettleOpen(false);
                 setQuickSettleTarget(null);
                 setQuickSettleFormaPagoId("");
+                setQuickSettleMonto(0);
+                setQuickSettleObservaciones("");
               }}
             >
               Cancelar

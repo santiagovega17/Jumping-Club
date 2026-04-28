@@ -40,6 +40,8 @@ type MarcarMovimientoPagadoInput = {
   userId: string;
   movimientoId: string;
   formaPagoId: string;
+  montoPagado?: number;
+  observaciones?: string | null;
 };
 
 type GenerarCuotasPendientesResult = {
@@ -430,13 +432,22 @@ export async function marcarMovimientoPagadoAction(input: MarcarMovimientoPagado
       return { ok: false as const, error: "Solo se pueden cobrar/pagar movimientos pendientes" };
     }
 
+    const montoPagado = Number(input.montoPagado ?? NaN);
+    const payload: Database["public"]["Tables"]["movimientos_caja"]["Update"] = {
+      estado: "pagado",
+      forma_pago_id: input.formaPagoId,
+      fecha: new Date().toISOString(),
+    };
+    if (Number.isFinite(montoPagado) && montoPagado >= 0) {
+      payload.monto = montoPagado;
+    }
+    if (typeof input.observaciones === "string") {
+      payload.observaciones = input.observaciones.trim() || null;
+    }
+
     const { error: updateError } = await admin
       .from("movimientos_caja")
-      .update({
-        estado: "pagado",
-        forma_pago_id: input.formaPagoId,
-        fecha: new Date().toISOString(),
-      })
+      .update(payload)
       .eq("id", input.movimientoId)
       .eq("franquicia_id", franquiciaId);
     if (updateError) return { ok: false as const, error: updateError.message };
