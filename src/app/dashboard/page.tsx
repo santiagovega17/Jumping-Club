@@ -3,19 +3,13 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { SectionHeading } from "@/components/SectionHeading";
-import { PAGE_TITLE_CLASS } from "@/lib/headings";
+import { KPI_TITLE_CLASS, PAGE_TITLE_CLASS } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 import { useEffect, useState } from "react";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import { SucursalDashboardOverview } from "@/components/dashboard/SucursalDashboardOverview";
 
 type Role = "admin" | "socio";
-
-const COLOR_INGRESO = "#5ab253";
-const COLOR_EGRESO = "#e41b68";
-
-const FONT_UI =
-  "var(--font-sans), ui-sans-serif, system-ui, sans-serif";
 
 export default function DashboardPage() {
   const [role] = useState<Role>(() => {
