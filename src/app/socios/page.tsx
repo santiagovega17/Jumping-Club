@@ -1103,16 +1103,18 @@ export default function SociosPage() {
             ) : filtrados.map((socio) => (
               <TableRow
                 key={socio.socioId}
-                className="border-zinc-800/50 hover:bg-zinc-900/40"
+                className="cursor-pointer border-zinc-800/50 hover:bg-zinc-900/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                onClick={() => abrirDetalle(socio)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    abrirDetalle(socio);
+                  }
+                }}
+                tabIndex={0}
               >
                 <TableCell className="font-medium">
-                  <button
-                    type="button"
-                    onClick={() => abrirDetalle(socio)}
-                    className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
-                  >
-                    {socio.nombre}
-                  </button>
+                  {socio.nombre}
                 </TableCell>
                 <TableCell className="text-foreground/85">{socio.dni}</TableCell>
                 <TableCell className="text-foreground/85">{socio.plan}</TableCell>

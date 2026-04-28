@@ -21,6 +21,13 @@ type GetClaseHistorialInput = {
 type InscribirSocioEnClaseInput = {
   claseId: string;
   socioId: string;
+  /** Si se envía, debe ser un admin de la misma franquicia que la clase; omite el bloqueo por socio vencido/inactivo. */
+  operatorUserId?: string | null;
+};
+
+type DesinscribirSocioDeClaseInput = {
+  userId: string;
+  claseId: string;
 };
 
 function getAdminClient() {
@@ -133,27 +140,59 @@ export async function inscribirSocioEnClase(input: InscribirSocioEnClaseInput) {
 
     const { data: socio, error: socioError } = await admin
       .from("socios")
-      .select("id,estado")
+      .select("id,estado,franquicia_id")
       .eq("id", input.socioId)
       .maybeSingle();
     if (socioError || !socio?.id) {
       return { ok: false as const, error: socioError?.message ?? "Socio no encontrado" };
     }
-    const estadoSocio = String(socio.estado ?? "").toLowerCase();
-    if (estadoSocio === "vencido" || estadoSocio === "inactivo") {
-      return {
-        ok: false as const,
-        error: "No se puede inscribir porque su cuota está vencida o pendiente de pago.",
-      };
-    }
 
     const { data: clase, error: claseError } = await admin
       .from("clases")
-      .select("id,cupo_maximo,reservas_actuales")
+      .select("id,cupo_maximo,reservas_actuales,franquicia_id")
       .eq("id", input.claseId)
       .single();
     if (claseError || !clase) {
       return { ok: false as const, error: claseError?.message ?? "Clase no encontrada" };
+    }
+
+    const socioFranquicia = String(socio.franquicia_id ?? "");
+    const claseFranquicia = String(clase.franquicia_id ?? "");
+    if (!socioFranquicia || !claseFranquicia || socioFranquicia !== claseFranquicia) {
+      return { ok: false as const, error: "El socio y la clase deben pertenecer a la misma franquicia" };
+    }
+
+    let inscripcionComoAdmin = false;
+    if (input.operatorUserId) {
+      const { data: operador, error: operadorError } = await admin
+        .from("perfiles")
+        .select("rol,franquicia_id")
+        .eq("id", input.operatorUserId)
+        .maybeSingle();
+      if (operadorError || !operador) {
+        return { ok: false as const, error: "No se pudo validar al operador" };
+      }
+      const rol = operador.rol as string;
+      if (rol !== "admin_franquicia" && rol !== "admin_global") {
+        return { ok: false as const, error: "Solo un administrador puede inscribir a otro socio" };
+      }
+      if (rol === "admin_franquicia") {
+        const opF = String(operador.franquicia_id ?? "");
+        if (!opF || opF !== socioFranquicia || opF !== claseFranquicia) {
+          return { ok: false as const, error: "No tenés permiso para inscribir en esta franquicia" };
+        }
+      }
+      inscripcionComoAdmin = true;
+    }
+
+    if (!inscripcionComoAdmin) {
+      const estadoSocio = String(socio.estado ?? "").toLowerCase();
+      if (estadoSocio === "vencido" || estadoSocio === "inactivo") {
+        return {
+          ok: false as const,
+          error: "No se puede inscribir porque su cuota está vencida o pendiente de pago.",
+        };
+      }
     }
 
     const cupoMaximo = Number(clase.cupo_maximo ?? 0);
@@ -235,6 +274,99 @@ export async function getInscriptosPorClaseAction(claseId: string) {
       ok: false as const,
       error: error instanceof Error ? error.message : "No se pudieron obtener los inscriptos",
       data: [] as Array<{ socioId: string; nombre: string }>,
+    };
+  }
+}
+
+export async function desinscribirSocioDeClaseAction(input: DesinscribirSocioDeClaseInput) {
+  try {
+    const admin = getAdminClient();
+    if (!admin) {
+      return { ok: false as const, error: "Faltan variables de entorno de Supabase" };
+    }
+    if (!input.claseId || !input.userId) {
+      return { ok: false as const, error: "Datos incompletos para darse de baja" };
+    }
+
+    const { data: socio, error: socioError } = await admin
+      .from("socios")
+      .select("id,franquicia_id")
+      .eq("perfil_id", input.userId)
+      .maybeSingle();
+    if (socioError || !socio?.id) {
+      return { ok: false as const, error: socioError?.message ?? "Socio no encontrado" };
+    }
+
+    const { data: clase, error: claseError } = await admin
+      .from("clases")
+      .select("id,franquicia_id,fecha_hora")
+      .eq("id", input.claseId)
+      .maybeSingle();
+    if (claseError || !clase?.id) {
+      return { ok: false as const, error: claseError?.message ?? "Clase no encontrada" };
+    }
+    if (String(clase.franquicia_id) !== String(socio.franquicia_id)) {
+      return { ok: false as const, error: "La clase no pertenece a tu franquicia" };
+    }
+
+    const { data: franquicia, error: franquiciaError } = await admin
+      .from("franquicias")
+      .select("minutos_limite_baja_inscripcion")
+      .eq("id", clase.franquicia_id as string)
+      .maybeSingle();
+    if (franquiciaError) {
+      return { ok: false as const, error: franquiciaError.message };
+    }
+
+    const minutosLimite = Number(franquicia?.minutos_limite_baja_inscripcion ?? 30);
+    const limiteMs = Math.max(0, minutosLimite) * 60 * 1000;
+    const inicioMs = Date.parse(String(clase.fecha_hora ?? ""));
+    if (!Number.isFinite(inicioMs)) {
+      return { ok: false as const, error: "No se pudo interpretar la fecha de la clase" };
+    }
+    const cierreBajaMs = inicioMs - limiteMs;
+    if (Date.now() >= cierreBajaMs) {
+      return {
+        ok: false as const,
+        error: `Ya no podés darte de baja: faltan menos de ${minutosLimite} minutos para el inicio de la clase.`,
+      };
+    }
+
+    const { data: inscripcion, error: insSelectError } = await admin
+      .from("inscripciones")
+      .select("id")
+      .eq("clase_id", input.claseId)
+      .eq("socio_id", socio.id)
+      .maybeSingle();
+    if (insSelectError) return { ok: false as const, error: insSelectError.message };
+    if (!inscripcion?.id) {
+      return { ok: false as const, error: "No estás inscripto en esta clase" };
+    }
+
+    const { error: deleteError } = await admin
+      .from("inscripciones")
+      .delete()
+      .eq("id", inscripcion.id as string);
+    if (deleteError) return { ok: false as const, error: deleteError.message };
+
+    const { count, error: countError } = await admin
+      .from("inscripciones")
+      .select("id", { count: "exact", head: true })
+      .eq("clase_id", input.claseId);
+    if (countError) return { ok: false as const, error: countError.message };
+
+    const { error: updateClaseError } = await admin
+      .from("clases")
+      .update({ reservas_actuales: count ?? 0 })
+      .eq("id", input.claseId);
+    if (updateClaseError) return { ok: false as const, error: updateClaseError.message };
+
+    revalidatePath("/calendario");
+    return { ok: true as const };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: error instanceof Error ? error.message : "No se pudo completar la baja",
     };
   }
 }

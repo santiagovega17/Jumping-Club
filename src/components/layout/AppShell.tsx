@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 
 type AppShellProps = {
   children: React.ReactNode;
@@ -15,16 +16,40 @@ export function AppShell({ children }: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const isLoginPage = pathname === "/login" || pathname === "/";
+  const isUniversalJumpsRoute = pathname.startsWith("/universal-jumps");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
-    const userRole = sessionStorage.getItem("userRole");
-    if (!userRole && !isLoginPage) {
-      router.push("/login");
-    }
+    if (isLoginPage) return;
+    const validateSession = async () => {
+      const userRole = sessionStorage.getItem("userRole");
+      if (!userRole) {
+        router.push("/login");
+        return;
+      }
+      try {
+        const supabase = createSupabaseClient();
+        const { data, error } = await supabase.auth.getUser();
+        if (error || !data.user) {
+          await supabase.auth.signOut();
+          sessionStorage.removeItem("userRole");
+          sessionStorage.removeItem("jumpingClubUserId");
+          localStorage.removeItem("jumpingClubRole");
+          router.replace("/login");
+        } else {
+          sessionStorage.setItem("jumpingClubUserId", data.user.id);
+        }
+      } catch {
+        sessionStorage.removeItem("userRole");
+        sessionStorage.removeItem("jumpingClubUserId");
+        localStorage.removeItem("jumpingClubRole");
+        router.replace("/login");
+      }
+    };
+    void validateSession();
   }, [isLoginPage, router]);
 
-  if (isLoginPage) {
+  if (isLoginPage || isUniversalJumpsRoute) {
     return <main className="min-h-screen w-full bg-zinc-950">{children}</main>;
   }
 

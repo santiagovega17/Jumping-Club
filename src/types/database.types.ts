@@ -15,18 +15,21 @@ export type Database = {
           nombre: string;
           direccion: string | null;
           created_at: string | null;
+          minutos_limite_baja_inscripcion: number;
         };
         Insert: {
           id?: string;
           nombre: string;
           direccion?: string | null;
           created_at?: string | null;
+          minutos_limite_baja_inscripcion?: number;
         };
         Update: {
           id?: string;
           nombre?: string;
           direccion?: string | null;
           created_at?: string | null;
+          minutos_limite_baja_inscripcion?: number;
         };
         Relationships: [];
       };

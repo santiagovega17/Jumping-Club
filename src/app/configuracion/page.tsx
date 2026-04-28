@@ -51,6 +51,7 @@ import { cn } from "@/lib/utils";
 import { toTitleCase } from "@/lib/text";
 import { toast } from "sonner";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
+import { actualizarMinutosLimiteBajaInscripcionAction } from "@/actions/franquicia";
 import type { ConceptoCaja, FormaPago, PlantillaClase } from "@/types/database.types";
 
 const LABEL_TECH =
@@ -292,6 +293,8 @@ export default function ConfiguracionPage() {
   const [plantillaEditNombre, setPlantillaEditNombre] = useState("");
   const [plantillaEditInstructorId, setPlantillaEditInstructorId] = useState("");
   const [plantillaEditHorario, setPlantillaEditHorario] = useState("09:00");
+  const [minutosLimiteBajaInscripcion, setMinutosLimiteBajaInscripcion] = useState(30);
+  const [guardandoLimiteBaja, setGuardandoLimiteBaja] = useState(false);
   const { data: adminContext } = useSWR(
     "config-admin-context",
     async () => {
@@ -306,7 +309,7 @@ export default function ConfiguracionPage() {
         .eq("id", user.id)
         .single();
       if (perfilError || !perfil?.franquicia_id) return null;
-      return { franquiciaId: perfil.franquicia_id };
+      return { franquiciaId: perfil.franquicia_id, userId: user.id };
     },
     { revalidateOnFocus: false, keepPreviousData: true },
   );
@@ -320,7 +323,7 @@ export default function ConfiguracionPage() {
     async () => {
       const franquiciaId = adminContext!.franquiciaId;
       const supabase = createSupabaseClient();
-      const [planesRes, instRes, fpRes, ccRes, plRes] = await Promise.all([
+      const [planesRes, instRes, fpRes, ccRes, plRes, franquiciaRes] = await Promise.all([
         supabase
           .from("planes")
           .select("id,nombre,precio,estado")
@@ -352,10 +355,20 @@ export default function ConfiguracionPage() {
           .eq("activo", true)
           .order("orden", { ascending: true })
           .order("horario", { ascending: true }),
+        supabase
+          .from("franquicias")
+          .select("minutos_limite_baja_inscripcion")
+          .eq("id", franquiciaId)
+          .single(),
       ]);
 
       return {
         franquiciaId,
+        minutosLimiteBajaInscripcion: (() => {
+          const v = franquiciaRes.data?.minutos_limite_baja_inscripcion;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : 30;
+        })(),
         pases:
           !planesRes.error && planesRes.data
             ? planesRes.data.map((p) => ({
@@ -410,7 +423,30 @@ export default function ConfiguracionPage() {
     setFormasPagoRows(franquiciaData.formas);
     setConceptosCajaRows(franquiciaData.conceptos);
     setPlantillasRows(franquiciaData.plantillas);
+    setMinutosLimiteBajaInscripcion(franquiciaData.minutosLimiteBajaInscripcion);
   }, [franquiciaData]);
+
+  const guardarLimiteBajaInscripcion = useCallback(async () => {
+    if (!adminContext?.userId) {
+      toast.error("No se pudo identificar al usuario actual");
+      return;
+    }
+    setGuardandoLimiteBaja(true);
+    try {
+      const result = await actualizarMinutosLimiteBajaInscripcionAction({
+        userId: adminContext.userId,
+        minutos: minutosLimiteBajaInscripcion,
+      });
+      if (!result.ok) {
+        toast.error(result.error ?? "No se pudo guardar");
+        return;
+      }
+      await mutateFranquiciaData();
+      toast.success("Política de bajas actualizada");
+    } finally {
+      setGuardandoLimiteBaja(false);
+    }
+  }, [adminContext?.userId, minutosLimiteBajaInscripcion, mutateFranquiciaData]);
 
   const updateBlock = useCallback(
     (block: "manana" | "tarde", patch: Partial<BlockSchedule>) => {
@@ -1700,6 +1736,51 @@ export default function ConfiguracionPage() {
                     </div>
                   </div>
                 </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className={cardClass}>
+            <CardHeader>
+              <PremiumCardTitle>Baja de inscripciones (socios)</PremiumCardTitle>
+              <CardDescription className="text-sm text-zinc-500">
+                Tiempo mínimo antes del inicio de cada clase en el que el socio ya no puede
+                anular su reserva. Vale para todas las clases y todos los días.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:max-w-md">
+                <div className="space-y-1.5">
+                  <Label htmlFor="limite-baja-minutos" className={LABEL_TECH}>
+                    Antelación mínima (minutos)
+                  </Label>
+                  <Input
+                    id="limite-baja-minutos"
+                    type="number"
+                    min={0}
+                    max={10080}
+                    inputMode="numeric"
+                    value={minutosLimiteBajaInscripcion}
+                    onChange={(e) =>
+                      setMinutosLimiteBajaInscripcion(
+                        Math.max(0, Math.min(10_080, Math.round(Number(e.target.value) || 0))),
+                      )
+                    }
+                    className="border-zinc-800 bg-zinc-950 text-zinc-100"
+                  />
+                  <p className="text-xs text-zinc-500">
+                    Ejemplo: con 30, si la clase empieza a las 10:00, la baja en línea se cierra a
+                    las 9:30.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  className={cn("w-full sm:w-auto", BTN_VERDE)}
+                  disabled={guardandoLimiteBaja || !adminContext?.userId}
+                  onClick={() => void guardarLimiteBajaInscripcion()}
+                >
+                  {guardandoLimiteBaja ? "Guardando…" : "Guardar política"}
+                </Button>
               </div>
             </CardContent>
           </Card>

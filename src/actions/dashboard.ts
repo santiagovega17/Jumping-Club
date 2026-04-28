@@ -36,17 +36,35 @@ function currentMonthRange() {
   };
 }
 
-export async function getDashboardKPIs(userId: string) {
+async function resolveScopeFranquiciaId(
+  admin: ReturnType<typeof getAdminClient>,
+  userId?: string | null,
+  franquiciaIdOverride?: string | null,
+) {
+  if (franquiciaIdOverride) return { franquiciaId: franquiciaIdOverride, error: null as string | null };
+  if (!userId) return { franquiciaId: null, error: "Usuario no especificado" };
+  return resolveFranquiciaId(userId, admin);
+}
+
+export async function getDashboardKPIs(userId?: string | null, franquiciaIdOverride?: string | null) {
   try {
     const admin = getAdminClient();
     if (!admin) return { ok: false as const, error: "Faltan variables de entorno de Supabase" };
 
-    const { franquiciaId, error: franquiciaError } = await resolveFranquiciaId(userId, admin);
+    const { franquiciaId, error: franquiciaError } = await resolveScopeFranquiciaId(
+      admin,
+      userId,
+      franquiciaIdOverride,
+    );
     if (franquiciaError || !franquiciaId) {
       return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };
     }
 
     const { startDate, endDate } = currentMonthRange();
+    const nowMs = Date.now();
+    const windowStart = new Date(nowMs - 48 * 60 * 60 * 1000).toISOString();
+    const windowEnd = new Date(nowMs + 730 * 24 * 60 * 60 * 1000).toISOString();
+
     const [movimientosRes, proximaClaseRes] = await Promise.all([
       admin
         .from("movimientos_caja")
@@ -57,13 +75,13 @@ export async function getDashboardKPIs(userId: string) {
         .lte("fecha", endDate),
       admin
         .from("clases")
-        .select("nombre,fecha_hora,instructor:instructores(nombre)")
+        .select("nombre,fecha_hora,estado,instructor:instructores(nombre)")
         .eq("franquicia_id", franquiciaId)
-        .neq("estado", "cancelada")
-        .gt("fecha_hora", new Date().toISOString())
+        .or("estado.eq.activa,estado.is.null")
+        .gte("fecha_hora", windowStart)
+        .lte("fecha_hora", windowEnd)
         .order("fecha_hora", { ascending: true })
-        .limit(1)
-        .maybeSingle(),
+        .limit(400),
     ]);
 
     if (movimientosRes.error) return { ok: false as const, error: movimientosRes.error.message };
@@ -79,12 +97,26 @@ export async function getDashboardKPIs(userId: string) {
       { ingresos: 0, egresos: 0 },
     );
 
-    const clase = proximaClaseRes.data
+    const claseRow = (proximaClaseRes.data ?? []).find((row) => {
+      if (String(row.estado ?? "").toLowerCase() === "cancelada") return false;
+      const t = Date.parse(String(row.fecha_hora ?? ""));
+      return Number.isFinite(t) && t > nowMs;
+    });
+
+    const instructorRel = claseRow?.instructor as
+      | { nombre?: string | null }
+      | { nombre?: string | null }[]
+      | null
+      | undefined;
+    const instructorNombre = Array.isArray(instructorRel)
+      ? instructorRel[0]?.nombre ?? null
+      : instructorRel?.nombre ?? null;
+
+    const clase = claseRow
       ? {
-          nombre: proximaClaseRes.data.nombre,
-          fechaHora: proximaClaseRes.data.fecha_hora,
-          instructor: (proximaClaseRes.data.instructor as { nombre?: string | null } | null)
-            ?.nombre ?? null,
+          nombre: claseRow.nombre,
+          fechaHora: claseRow.fecha_hora,
+          instructor: instructorNombre,
         }
       : null;
 
@@ -104,35 +136,66 @@ export async function getDashboardKPIs(userId: string) {
   }
 }
 
-export async function getDashboardProximosVencimientos(userId: string, limit = 5) {
+export async function getDashboardProximosVencimientos(
+  userId?: string | null,
+  limit = 5,
+  franquiciaIdOverride?: string | null,
+) {
   try {
     const admin = getAdminClient();
     if (!admin) return { ok: false as const, error: "Faltan variables de entorno de Supabase" };
 
-    const { franquiciaId, error: franquiciaError } = await resolveFranquiciaId(userId, admin);
+    const { franquiciaId, error: franquiciaError } = await resolveScopeFranquiciaId(
+      admin,
+      userId,
+      franquiciaIdOverride,
+    );
     if (franquiciaError || !franquiciaId) {
       return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };
     }
 
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const fetchCap = Math.min(500, Math.max(80, limit * 40));
     const { data, error } = await admin
       .from("movimientos_caja")
-      .select("id,monto,fecha_vencimiento,concepto:conceptos_caja(concepto,descripcion)")
+      .select(
+        "id,monto,fecha,fecha_vencimiento,tipo,estado,concepto:conceptos_caja(concepto,descripcion)",
+      )
       .eq("franquicia_id", franquiciaId)
       .eq("estado", "pendiente")
-      .gte("fecha_vencimiento", todayIso)
-      .order("fecha_vencimiento", { ascending: true })
-      .limit(limit);
+      .eq("tipo", "egreso")
+      .limit(fetchCap);
     if (error) return { ok: false as const, error: error.message };
 
-    const rows = (data ?? []).map((row) => ({
-      id: row.id,
-      concepto: (row.concepto as { concepto?: string | null } | null)?.concepto ?? "Sin concepto",
-      descripcion:
-        (row.concepto as { descripcion?: string | null } | null)?.descripcion ?? "",
-      total: Number(row.monto ?? 0),
-      fecha: (row as { fecha_vencimiento?: string | null }).fecha_vencimiento ?? "",
-    }));
+    type Row = {
+      id: string;
+      monto: number | null;
+      fecha: string | null;
+      fecha_vencimiento?: string | null;
+      concepto?: { concepto?: string | null; descripcion?: string | null } | null;
+    };
+
+    const sortKey = (row: Row) => {
+      const fv = row.fecha_vencimiento?.slice(0, 10) ?? "";
+      const fd = row.fecha?.slice(0, 10) ?? "";
+      return fv || fd || "9999-99-99";
+    };
+
+    const rows = [...((data ?? []) as Row[])]
+      .sort((a, b) => sortKey(a).localeCompare(sortKey(b)))
+      .slice(0, limit)
+      .map((row) => {
+        const join = row.concepto;
+        const fv = row.fecha_vencimiento?.slice(0, 10) ?? "";
+        const fd = row.fecha?.slice(0, 10) ?? "";
+        const monto = Number(row.monto ?? 0);
+        return {
+          id: row.id,
+          concepto: join?.concepto?.trim() || "Sin concepto",
+          descripcion: (join?.descripcion ?? "").trim(),
+          total: -Math.abs(monto),
+          fecha: fv || fd,
+        };
+      });
 
     return { ok: true as const, data: rows };
   } catch (error) {
@@ -143,12 +206,16 @@ export async function getDashboardProximosVencimientos(userId: string, limit = 5
   }
 }
 
-export async function getDashboardChartData(userId: string) {
+export async function getDashboardChartData(userId?: string | null, franquiciaIdOverride?: string | null) {
   try {
     const admin = getAdminClient();
     if (!admin) return { ok: false as const, error: "Faltan variables de entorno de Supabase" };
 
-    const { franquiciaId, error: franquiciaError } = await resolveFranquiciaId(userId, admin);
+    const { franquiciaId, error: franquiciaError } = await resolveScopeFranquiciaId(
+      admin,
+      userId,
+      franquiciaIdOverride,
+    );
     if (franquiciaError || !franquiciaId) {
       return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };
     }
@@ -200,12 +267,20 @@ export async function getDashboardChartData(userId: string) {
   }
 }
 
-export async function getDashboardUltimosMovimientos(userId: string, limit = 5) {
+export async function getDashboardUltimosMovimientos(
+  userId?: string | null,
+  limit = 5,
+  franquiciaIdOverride?: string | null,
+) {
   try {
     const admin = getAdminClient();
     if (!admin) return { ok: false as const, error: "Faltan variables de entorno de Supabase" };
 
-    const { franquiciaId, error: franquiciaError } = await resolveFranquiciaId(userId, admin);
+    const { franquiciaId, error: franquiciaError } = await resolveScopeFranquiciaId(
+      admin,
+      userId,
+      franquiciaIdOverride,
+    );
     if (franquiciaError || !franquiciaId) {
       return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };
     }

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
-import { CheckCircle2, Pencil, Plus } from "lucide-react";
+import { CheckCircle2, Pencil, Plus, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -44,6 +44,7 @@ import { z } from "zod";
 import { es } from "date-fns/locale";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import {
+  desinscribirSocioDeClaseAction,
   getClaseHistorialAction,
   getInscriptosPorClaseAction,
   inscribirSocioEnClase,
@@ -109,6 +110,12 @@ type ClaseHistorialItem = {
 type InscriptoClase = {
   socioId: string;
   nombre: string;
+};
+
+type SocioListaInscripcionAdmin = {
+  id: string;
+  nombre: string;
+  estado: string | null;
 };
 
 type BlockSchedule = {
@@ -259,6 +266,9 @@ export default function CalendarioPage() {
   const [classFieldErrors, setClassFieldErrors] = useState<
     Partial<Record<"nombre" | "instructorId" | "hora", string>>
   >({});
+  const [isBajandoInscripcion, setIsBajandoInscripcion] = useState(false);
+  const [socioInscripcionAdminId, setSocioInscripcionAdminId] = useState("");
+  const [inscribiendoSocioAdmin, setInscribiendoSocioAdmin] = useState(false);
 
   const selectedDateKey = selectedDate.toISOString().slice(0, 10);
   const selectedDayId = weekdayToDayId(selectedDate.getDay());
@@ -302,10 +312,23 @@ export default function CalendarioPage() {
         .eq("perfil_id", user.id)
         .maybeSingle();
 
+      const { data: franquiciaRow } = await supabase
+        .from("franquicias")
+        .select("minutos_limite_baja_inscripcion")
+        .eq("id", perfil.franquicia_id)
+        .maybeSingle();
+      const minutosLimiteBajaInscripcion = Number(
+        franquiciaRow?.minutos_limite_baja_inscripcion ?? 30,
+      );
+
       return {
+        userId: user.id,
         franquiciaId: perfil.franquicia_id,
         socioId: socioRow?.id ?? null,
         socioEstado: socioRow?.estado ?? null,
+        minutosLimiteBajaInscripcion: Number.isFinite(minutosLimiteBajaInscripcion)
+          ? minutosLimiteBajaInscripcion
+          : 30,
         instructores:
           (instRows ?? [])
             .filter((x) => x.id && x.nombre)
@@ -322,6 +345,10 @@ export default function CalendarioPage() {
     setCurrentSocioEstado(calendarContext.socioEstado);
     setInstructoresConfig(calendarContext.instructores);
   }, [calendarContext]);
+
+  useEffect(() => {
+    setSocioInscripcionAdminId("");
+  }, [selectedClaseId]);
 
   const {
     data: calendarData,
@@ -574,6 +601,49 @@ export default function CalendarioPage() {
     { revalidateOnFocus: false, keepPreviousData: true },
   );
 
+  const {
+    data: sociosInscripcionAdminData,
+    isLoading: isLoadingSociosInscripcionAdmin,
+    error: sociosInscripcionAdminError,
+  } = useSWR<SocioListaInscripcionAdmin[]>(
+    role === "administracion" && adminFranquiciaId
+      ? ["calendario-socios-inscripcion-admin", adminFranquiciaId]
+      : null,
+    async () => {
+      const supabase = createSupabaseClient();
+      const { data, error } = await supabase
+        .from("socios")
+        .select("id,estado,perfil:perfiles(nombre)")
+        .eq("franquicia_id", adminFranquiciaId!)
+        .order("nombre", { ascending: true, foreignTable: "perfiles" });
+      if (error) throw new Error(error.message);
+      const rows = (data ?? []) as Array<{
+        id: string;
+        estado: string | null;
+        perfil?: { nombre?: string | null } | null;
+      }>;
+      return rows
+        .filter((r) => Boolean(r.id))
+        .map((r) => ({
+          id: r.id,
+          nombre: (r.perfil?.nombre ?? "").trim() || "Sin nombre",
+          estado: r.estado,
+        }));
+    },
+    { revalidateOnFocus: false, keepPreviousData: true },
+  );
+
+  const sociosInscribiblesParaAdmin = useMemo(() => {
+    const base = sociosInscripcionAdminData ?? [];
+    const ya = new Set((inscriptosClaseData ?? []).map((i) => i.socioId));
+    return [...base].filter((s) => !ya.has(s.id)).sort((a, b) => a.nombre.localeCompare(b.nombre));
+  }, [inscriptosClaseData, sociosInscripcionAdminData]);
+
+  const claseCupoLlenoAdmin = useMemo(() => {
+    if (!selectedClase) return false;
+    return selectedClase.ocupados >= selectedClase.max;
+  }, [selectedClase]);
+
   const closeClassSheet = () => {
     setClassSheetOpen(false);
     setClassSheetContext(null);
@@ -681,6 +751,51 @@ export default function CalendarioPage() {
     void confirmarInscripcion();
   };
 
+  const onInscribirSocioAdministrativo = useCallback(() => {
+    const classId = selectedClase?.classId ?? null;
+    const operatorUserId = calendarContext?.userId ?? null;
+    if (!classId || !socioInscripcionAdminId) {
+      toast.error("Elegí una clase persistida y un socio para inscribir");
+      return;
+    }
+    if (!operatorUserId) {
+      toast.error("No se pudo identificar tu sesión");
+      return;
+    }
+    if (!selectedClase || selectedClase.ocupados >= selectedClase.max) {
+      toast.error("Cupo lleno");
+      return;
+    }
+    const socioId = socioInscripcionAdminId;
+    const run = async () => {
+      setInscribiendoSocioAdmin(true);
+      try {
+        const result = await inscribirSocioEnClase({
+          claseId: classId,
+          socioId,
+          operatorUserId,
+        });
+        if (!result.ok) {
+          toast.error(result.error ?? "No se pudo inscribir al socio");
+          return;
+        }
+        setSocioInscripcionAdminId("");
+        await reloadCalendarData();
+        await mutateInscriptosClase();
+        toast.success("Socio inscripto correctamente");
+      } finally {
+        setInscribiendoSocioAdmin(false);
+      }
+    };
+    void run();
+  }, [
+    calendarContext?.userId,
+    mutateInscriptosClase,
+    reloadCalendarData,
+    selectedClase,
+    socioInscripcionAdminId,
+  ]);
+
   const socioEstaInhabilitado = useMemo(() => {
     const estado = String(currentSocioEstado ?? "").toLowerCase();
     return estado === "vencido" || estado === "inactivo";
@@ -706,6 +821,56 @@ export default function CalendarioPage() {
     if (socioEstaInhabilitado) return "socio-inhabilitado";
     return "ok";
   }, [claseSinCupo, socioEstaInhabilitado, socioYaIncriptoEnClase]);
+
+  const minutosLimiteBajaInscripcion = calendarContext?.minutosLimiteBajaInscripcion ?? 30;
+
+  const puedeDarDeBajaInscripcion = useMemo(() => {
+    if (!socioYaIncriptoEnClase || !selectedClase?.classId || !selectedClase.fechaHora) {
+      return false;
+    }
+    const inicioMs = Date.parse(selectedClase.fechaHora);
+    if (!Number.isFinite(inicioMs)) return false;
+    const limiteMs = Math.max(0, minutosLimiteBajaInscripcion) * 60 * 1000;
+    return Date.now() < inicioMs - limiteMs;
+  }, [
+    minutosLimiteBajaInscripcion,
+    selectedClase?.classId,
+    selectedClase?.fechaHora,
+    socioYaIncriptoEnClase,
+  ]);
+
+  const onDarDeBajaInscripcion = useCallback(() => {
+    if (!calendarContext?.userId || !selectedClase?.classId) {
+      toast.error("No se pudo identificar la clase o tu usuario");
+      return;
+    }
+    const claseId = selectedClase.classId;
+    const userId = calendarContext.userId;
+    const ejecutar = async () => {
+      setIsBajandoInscripcion(true);
+      try {
+        const result = await desinscribirSocioDeClaseAction({
+          userId,
+          claseId,
+        });
+        if (!result.ok) {
+          toast.error(result.error ?? "No se pudo dar de baja");
+          return;
+        }
+        await reloadCalendarData();
+        await mutateInscriptosClase();
+        toast.success("Te diste de baja de la clase");
+      } finally {
+        setIsBajandoInscripcion(false);
+      }
+    };
+    void ejecutar();
+  }, [
+    calendarContext?.userId,
+    mutateInscriptosClase,
+    reloadCalendarData,
+    selectedClase?.classId,
+  ]);
 
   const confirmarClaseSheet = () => {
     if (isSavingClase) return;
@@ -1083,6 +1248,29 @@ export default function CalendarioPage() {
                   "Confirma para reservar tu lugar en este horario."
                 )}
               </p>
+              {estadoBotonInscripcion === "ya-inscripto" && selectedClase.classId ? (
+                <div className="mt-4 space-y-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-11 w-full border-zinc-600 text-zinc-200 hover:bg-zinc-800"
+                    disabled={!puedeDarDeBajaInscripcion || isBajandoInscripcion}
+                    onClick={onDarDeBajaInscripcion}
+                  >
+                    {isBajandoInscripcion ? "Procesando…" : "Darme de baja"}
+                  </Button>
+                  {!puedeDarDeBajaInscripcion ? (
+                    <p className="text-center text-xs text-zinc-500">
+                      Ya no podés anular: faltan menos de {minutosLimiteBajaInscripcion} minutos
+                      para el inicio de la clase.
+                    </p>
+                  ) : null}
+                </div>
+              ) : estadoBotonInscripcion === "ya-inscripto" && !selectedClase.classId ? (
+                <p className="mt-3 text-xs text-zinc-500">
+                  Para gestionar la baja, elegí la clase con cupo confirmado en el sistema.
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -1123,6 +1311,79 @@ export default function CalendarioPage() {
           <section className="flex h-full flex-col rounded-2xl border border-zinc-800/50 bg-card p-4 md:p-7">
             <div className="flex items-center justify-between gap-3">
               <SectionHeading as="h3">Socios Inscriptos</SectionHeading>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-zinc-800/60 bg-zinc-950/40 p-4">
+              <p className={cn(LABEL_TECH, "mb-3")}>Inscribir socio</p>
+              {sociosInscripcionAdminError ? (
+                <p className="text-sm text-red-400">No se pudo cargar el listado de socios.</p>
+              ) : null}
+              {!selectedClaseId ? (
+                <p className="text-sm text-zinc-500">Seleccioná una clase en el calendario.</p>
+              ) : !selectedClase?.classId ? (
+                <p className="text-sm text-zinc-500">
+                  Esta instancia aún no tiene registro persistido; no se puede inscribir desde acá.
+                </p>
+              ) : claseCupoLlenoAdmin ? (
+                <p className="text-sm text-amber-200/90">Cupo lleno: no se pueden agregar más inscriptos.</p>
+              ) : (
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <Label htmlFor="admin-inscripcion-socio" className="text-xs text-zinc-400">
+                      Socio
+                    </Label>
+                    <Select
+                      value={socioInscripcionAdminId || undefined}
+                      onValueChange={setSocioInscripcionAdminId}
+                      disabled={
+                        isLoadingSociosInscripcionAdmin ||
+                        inscribiendoSocioAdmin ||
+                        sociosInscribiblesParaAdmin.length === 0
+                      }
+                    >
+                      <SelectTrigger
+                        id="admin-inscripcion-socio"
+                        className="border-zinc-800 bg-zinc-950 text-zinc-100"
+                      >
+                        <SelectValue placeholder="Elegí un socio" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {sociosInscribiblesParaAdmin.map((s) => {
+                          const estado = String(s.estado ?? "").toLowerCase();
+                          const sufijo =
+                            estado === "vencido" || estado === "inactivo" ? ` — ${estado}` : "";
+                          return (
+                            <SelectItem key={s.id} value={s.id}>
+                              {s.nombre}
+                              {sufijo}
+                            </SelectItem>
+                          );
+                        })}
+                      </SelectContent>
+                    </Select>
+                    {!isLoadingSociosInscripcionAdmin &&
+                    (sociosInscripcionAdminData?.length ?? 0) > 0 &&
+                    sociosInscribiblesParaAdmin.length === 0 ? (
+                      <p className="text-xs text-zinc-500">Todos los socios de la franquicia ya están inscriptos.</p>
+                    ) : null}
+                  </div>
+                  <Button
+                    type="button"
+                    className="shrink-0 bg-primary text-primary-foreground hover:bg-primary/90"
+                    disabled={
+                      !socioInscripcionAdminId ||
+                      !calendarContext?.userId ||
+                      inscribiendoSocioAdmin ||
+                      isLoadingSociosInscripcionAdmin ||
+                      sociosInscribiblesParaAdmin.length === 0
+                    }
+                    onClick={onInscribirSocioAdministrativo}
+                  >
+                    <UserPlus className="size-4" aria-hidden />
+                    {inscribiendoSocioAdmin ? "Inscribiendo…" : "Inscribir"}
+                  </Button>
+                </div>
+              )}
             </div>
 
             <div className="mt-4">

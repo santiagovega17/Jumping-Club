@@ -30,7 +30,11 @@ export default function LoginPage() {
       });
 
       if (error || !data.user) {
-        toast.error("Credenciales incorrectas");
+        toast.error(
+          error?.message?.trim()
+            ? `No se pudo iniciar sesión: ${error.message}`
+            : "Credenciales incorrectas",
+        );
         return;
       }
 
@@ -45,16 +49,31 @@ export default function LoginPage() {
         return;
       }
 
+      const isSuperAdminRole = perfil.rol === "admin_global";
       const isAdminRole =
         perfil.rol === "admin_global" || perfil.rol === "admin_franquicia";
-      sessionStorage.setItem("userRole", isAdminRole ? "admin" : "socio");
+      sessionStorage.setItem(
+        "userRole",
+        isSuperAdminRole ? "superadmin" : isAdminRole ? "admin" : "socio",
+      );
+      sessionStorage.setItem("jumpingClubUserId", data.user.id);
       localStorage.setItem(
         "jumpingClubRole",
-        isAdminRole ? "administracion" : "socio",
+        isSuperAdminRole
+          ? "universal-jumps"
+          : isAdminRole
+            ? "administracion"
+            : "socio",
       );
 
-      toast.success(isAdminRole ? "Bienvenido Administrador" : "Bienvenido Socio");
-      router.push("/dashboard");
+      toast.success(
+        isSuperAdminRole
+          ? "Bienvenido Universal Jumps"
+          : isAdminRole
+            ? "Bienvenido Administrador"
+            : "Bienvenido Socio",
+      );
+      router.push(isSuperAdminRole ? "/universal-jumps" : "/dashboard");
     } finally {
       setIsLoading(false);
     }

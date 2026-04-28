@@ -19,6 +19,7 @@ import {
   ChevronRight,
   Clock,
   Plus,
+  Search,
   Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -91,6 +92,7 @@ import {
 } from "@/lib/franquicia-catalogo";
 import {
   deleteMovimientoCajaAction,
+  marcarMovimientoPagadoAction,
   crearMovimientoCajaAction,
   obtenerBalanceCaja,
   obtenerMovimientosRecientes,
@@ -282,15 +284,6 @@ function periodoLabelFromRange(startDate: string, endDate: string) {
   return `${format(startDate)} - ${format(endDate)}`;
 }
 
-function isVenceEn7Dias(isoDate: string) {
-  if (!isoDate) return false;
-  const today = new Date();
-  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const target = new Date(`${isoDate}T00:00:00`);
-  const diffDays = Math.ceil((target.getTime() - start.getTime()) / 86_400_000);
-  return diffDays >= 0 && diffDays <= 7;
-}
-
 function isPendienteVencido(row: Movimiento) {
   if (row.estado !== "Pendiente" || !row.fechaVencimiento) return false;
   const today = new Date();
@@ -300,20 +293,10 @@ function isPendienteVencido(row: Movimiento) {
 }
 
 export default function AdministracionPage() {
-  const [cachedCajaData] = useState<CajaDataCache | null>(() => {
-    if (typeof window === "undefined") return null;
-    try {
-      const raw = window.localStorage.getItem("admin-caja-cache-v1");
-      if (!raw) return null;
-      return JSON.parse(raw) as CajaDataCache;
-    } catch {
-      return null;
-    }
-  });
+  const [cachedCajaData, setCachedCajaData] = useState<CajaDataCache | null>(null);
   const defaultRange = getCurrentMonthRange();
   const [startDate, setStartDate] = useState(defaultRange.startDate);
   const [endDate, setEndDate] = useState(defaultRange.endDate);
-  const [filtroProximosVencimientos, setFiltroProximosVencimientos] = useState(false);
   const [sociosOptions, setSociosOptions] = useState<SocioOption[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
@@ -334,6 +317,12 @@ export default function AdministracionPage() {
   const [socioComboboxOpen, setSocioComboboxOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Movimiento | null>(null);
+  const [quickSettleOpen, setQuickSettleOpen] = useState(false);
+  const [quickSettleTarget, setQuickSettleTarget] = useState<Movimiento | null>(null);
+  const [quickSettleFormaPagoId, setQuickSettleFormaPagoId] = useState("");
+  const [isQuickSettling, setIsQuickSettling] = useState(false);
+  const [busquedaCobrosPendientes, setBusquedaCobrosPendientes] = useState("");
+  const [busquedaEgresosPendientes, setBusquedaEgresosPendientes] = useState("");
   const [hasTriedSubmitMovimiento, setHasTriedSubmitMovimiento] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -342,6 +331,17 @@ export default function AdministracionPage() {
   const [expConsEgr, setExpConsEgr] = useState<Record<string, boolean>>({});
 
   const chartReady = true;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem("admin-caja-cache-v1");
+      if (!raw) return;
+      setCachedCajaData(JSON.parse(raw) as CajaDataCache);
+    } catch {
+      setCachedCajaData(null);
+    }
+  }, []);
 
   useEffect(() => {
     const loadData = async () => {
@@ -433,7 +433,7 @@ export default function AdministracionPage() {
       const [balanceRes, vencimientosRes, movimientosRes] = await Promise.all([
         obtenerBalanceCaja({ userId: currentUserId!, startDate, endDate }),
         obtenerProximosVencimientos({ userId: currentUserId!, startDate, endDate, limit: 10 }),
-        obtenerMovimientosRecientes({ userId: currentUserId!, startDate, endDate, limit: 250 }),
+        obtenerMovimientosRecientes({ userId: currentUserId!, startDate, endDate, limit: 2_000 }),
       ]);
 
       type MovimientoCajaFetch = {
@@ -511,10 +511,13 @@ export default function AdministracionPage() {
     {
       fallbackData: cachedCajaData ?? undefined,
       keepPreviousData: true,
+      revalidateOnMount: true,
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
-      revalidateIfStale: false,
+      revalidateIfStale: true,
       dedupingInterval: 60_000,
+      refreshInterval: 60_000,
+      refreshWhenHidden: false,
     },
   );
 
@@ -531,19 +534,63 @@ export default function AdministracionPage() {
   const hasCajaData = Boolean(cajaDataView);
   const balanceCaja = cajaDataView?.balance ?? null;
   const movimientos = useMemo(() => cajaDataView?.movimientos ?? [], [cajaDataView]);
-  const proximosVencimientosTop = useMemo(
-    () => cajaDataView?.proximos ?? [],
-    [cajaDataView],
-  );
   const movimientosPeriodo = useMemo(() => movimientos, [movimientos]);
 
-  const filtrados = useMemo(() => {
-    const base = movimientosPeriodo;
-    if (!filtroProximosVencimientos) return base;
-    return base.filter(
-      (m) => m.estado === "Pendiente" && isVenceEn7Dias(m.fechaVencimiento),
+  const filtrados = useMemo(() => movimientosPeriodo, [movimientosPeriodo]);
+
+  const pendientesEgresos = useMemo(
+    () =>
+      movimientosPeriodo
+        .filter((m) => m.estado === "Pendiente" && m.categoria === "Egreso")
+        .sort((a, b) => {
+          const left = a.fechaVencimiento || a.fecha;
+          const right = b.fechaVencimiento || b.fecha;
+          return left.localeCompare(right);
+        }),
+    [movimientosPeriodo],
+  );
+
+  const cobrosPendientes = useMemo(
+    () =>
+      movimientosPeriodo
+        .filter((m) => m.estado === "Pendiente" && m.categoria === "Ingreso")
+        .sort((a, b) => {
+          const left = a.fechaVencimiento || a.fecha;
+          const right = b.fechaVencimiento || b.fecha;
+          return left.localeCompare(right);
+        }),
+    [movimientosPeriodo],
+  );
+
+  const pendientesEgresosCoincidenBusqueda = useMemo(() => {
+    const q = busquedaEgresosPendientes.trim().toLowerCase();
+    if (!q) return pendientesEgresos;
+    return pendientesEgresos.filter((m) => {
+      const blob = [m.concepto, m.descripcion, m.observaciones]
+        .filter((s) => (s ?? "").trim().length > 0)
+        .join(" ")
+        .toLowerCase();
+      return blob.includes(q);
+    });
+  }, [busquedaEgresosPendientes, pendientesEgresos]);
+
+  const pendientesEgresosMostrados = useMemo(() => {
+    if (busquedaEgresosPendientes.trim()) return pendientesEgresosCoincidenBusqueda;
+    return pendientesEgresos.slice(0, 5);
+  }, [busquedaEgresosPendientes, pendientesEgresos, pendientesEgresosCoincidenBusqueda]);
+
+  const cobrosPendientesCoincidenBusqueda = useMemo(() => {
+    const q = busquedaCobrosPendientes.trim().toLowerCase();
+    if (!q) return cobrosPendientes;
+    return cobrosPendientes.filter((m) =>
+      (m.socio ?? "").trim().toLowerCase().includes(q),
     );
-  }, [movimientosPeriodo, filtroProximosVencimientos]);
+  }, [busquedaCobrosPendientes, cobrosPendientes]);
+
+  const cobrosPendientesMostrados = useMemo(() => {
+    if (busquedaCobrosPendientes.trim()) return cobrosPendientesCoincidenBusqueda;
+    return cobrosPendientes.slice(0, 5);
+  }, [busquedaCobrosPendientes, cobrosPendientes, cobrosPendientesCoincidenBusqueda]);
 
   const pieData = useMemo(() => {
     const map: Record<string, number> = {};
@@ -685,11 +732,13 @@ export default function AdministracionPage() {
       const result = await crearMovimientoCajaAction({
         userId: currentUserId,
         tipo: draft.categoria === "Ingreso" ? "ingreso" : "egreso",
+        estado: draft.estado === "Pendiente" ? "pendiente" : "pagado",
         monto: montoNum,
         conceptoId: conceptoRow.id,
         formaPagoId: draft.formaPagoId,
         socioId: draft.socioId || null,
         fecha: draft.fecha,
+        fechaVencimiento: draft.estado === "Pendiente" ? draft.fechaVencimiento || draft.fecha : null,
         observaciones: draft.observaciones.trim() || null,
       });
 
@@ -743,6 +792,7 @@ export default function AdministracionPage() {
     toast.success("Movimiento eliminado");
   }, [currentUserId, editingId, mutateCaja]);
 
+
   const conceptosByCategoria = useMemo(
     () =>
       conceptosOptions.filter(
@@ -794,6 +844,42 @@ export default function AdministracionPage() {
       ),
     [sociosOptions],
   );
+
+  const openQuickSettle = useCallback((movimiento: Movimiento) => {
+    setQuickSettleTarget(movimiento);
+    setQuickSettleFormaPagoId(movimiento.formaPagoId || safeFormaPagoOptions[0]?.id || "");
+    setQuickSettleOpen(true);
+  }, [safeFormaPagoOptions]);
+
+  const confirmQuickSettle = useCallback(async () => {
+    if (!currentUserId || !quickSettleTarget?.id) {
+      toast.error("No se pudo identificar el movimiento");
+      return;
+    }
+    if (!quickSettleFormaPagoId) {
+      toast.error("Seleccioná una forma de pago");
+      return;
+    }
+    setIsQuickSettling(true);
+    try {
+      const result = await marcarMovimientoPagadoAction({
+        userId: currentUserId,
+        movimientoId: quickSettleTarget.id,
+        formaPagoId: quickSettleFormaPagoId,
+      });
+      if (!result.ok) {
+        toast.error(result.error ?? "No se pudo actualizar el estado del movimiento");
+        return;
+      }
+      setQuickSettleOpen(false);
+      setQuickSettleTarget(null);
+      setQuickSettleFormaPagoId("");
+      await mutateCaja();
+      toast.success("Movimiento marcado como pagado");
+    } finally {
+      setIsQuickSettling(false);
+    }
+  }, [currentUserId, mutateCaja, quickSettleFormaPagoId, quickSettleTarget]);
   const fieldsDisabled = sheetMode === "edit";
   const shouldShowValidationErrors = hasTriedSubmitMovimiento;
 
@@ -922,13 +1008,13 @@ export default function AdministracionPage() {
             <p className={KPI_TITLE_CLASS}>Ingresos</p>
           </CardHeader>
           <CardContent>
-            <p className={cn(kpiNumberClass, "text-[#5ab253]")}>
+            <div className={cn(kpiNumberClass, "text-[#5ab253]")}>
               {hasCajaData && balanceCaja ? (
                 formatPesos(balanceCaja.ingresos)
               ) : (
                 <Skeleton className="h-9 w-36 bg-zinc-800" />
               )}
-            </p>
+            </div>
           </CardContent>
         </Card>
         <Card className="border-zinc-800/50 bg-card shadow-none ring-0">
@@ -936,13 +1022,13 @@ export default function AdministracionPage() {
             <p className={KPI_TITLE_CLASS}>Egresos</p>
           </CardHeader>
           <CardContent>
-            <p className={cn(kpiNumberClass, "text-[#e41b68]")}>
+            <div className={cn(kpiNumberClass, "text-[#e41b68]")}>
               {hasCajaData && balanceCaja ? (
                 formatPesos(balanceCaja.egresos)
               ) : (
                 <Skeleton className="h-9 w-36 bg-zinc-800" />
               )}
-            </p>
+            </div>
           </CardContent>
         </Card>
         <Card className="border-zinc-800/50 bg-card shadow-none ring-0">
@@ -950,7 +1036,7 @@ export default function AdministracionPage() {
             <p className={KPI_TITLE_CLASS}>Saldo</p>
           </CardHeader>
           <CardContent>
-            <p
+            <div
               className={cn(
                 kpiNumberClass,
                 (balanceCaja?.saldo ?? 0) < 0 ? "text-red-500" : "text-green-500",
@@ -961,7 +1047,7 @@ export default function AdministracionPage() {
               ) : (
                 <Skeleton className="h-9 w-36 bg-zinc-800" />
               )}
-            </p>
+            </div>
           </CardContent>
         </Card>
         <Card className="border-zinc-800/50 bg-card shadow-none ring-0">
@@ -969,68 +1055,246 @@ export default function AdministracionPage() {
             <p className={KPI_TITLE_CLASS}>Pendientes</p>
           </CardHeader>
           <CardContent>
-            <p className={cn(kpiNumberClass, "text-amber-300")}>
+            <div
+              className={cn(
+                kpiNumberClass,
+                (balanceCaja?.pendientes ?? 0) < 0 ? "text-red-400" : "text-amber-300",
+              )}
+            >
               {hasCajaData && balanceCaja ? (
                 formatPesos(balanceCaja.pendientes)
               ) : (
                 <Skeleton className="h-9 w-36 bg-zinc-800" />
               )}
-            </p>
+            </div>
           </CardContent>
         </Card>
       </div>
-      <Card className="mt-6 border-zinc-800/50 bg-card shadow-none ring-0">
-        <CardHeader className="flex flex-row items-center justify-between gap-2">
-          <PremiumCardTitle>Próximos vencimientos</PremiumCardTitle>
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-amber-400/35 bg-amber-400/12">
-            <Clock className="size-4 text-amber-400" aria-hidden />
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto w-full pb-2">
-            <div className="overflow-hidden rounded-lg border border-zinc-800/50 min-w-[640px]">
-              <table className="w-full text-sm">
-              <thead className="bg-zinc-900">
-                <tr className="border-b border-zinc-800/50">
-                  <th className={cn("px-3 py-2 text-left", KPI_TITLE_CLASS)}>Concepto</th>
-                  <th className={cn("px-3 py-2 text-left", KPI_TITLE_CLASS)}>Descripción</th>
-                  <th className={cn("px-3 py-2 text-right", KPI_TITLE_CLASS)}>Total</th>
-                  <th className={cn("px-3 py-2 text-right", KPI_TITLE_CLASS)}>Fecha</th>
-                </tr>
-              </thead>
-              <tbody>
-                {!hasCajaData && isCajaLoading ? (
-                  <tr>
-                    <td colSpan={4} className="px-3 py-4 text-center text-sm text-zinc-500">
-                      Cargando...
-                    </td>
-                  </tr>
-                ) : proximosVencimientosTop.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="px-3 py-4 text-center text-sm text-zinc-500">
-                      No hay vencimientos en los próximos 7 días.
-                    </td>
-                  </tr>
-                ) : (
-                  proximosVencimientosTop.map((item) => (
-                    <tr key={item.id} className="border-b border-zinc-800/40 last:border-b-0">
-                      <td className="px-3 py-2 text-zinc-100">{item.concepto}</td>
-                      <td className="px-3 py-2 text-zinc-400">{item.descripcion}</td>
-                      <td className="px-3 py-2 text-right font-semibold text-zinc-100">
-                        {formatPesos(item.monto)}
-                      </td>
-                      <td className="px-3 py-2 text-right text-zinc-400">
-                        {isoToDisplay(item.fechaVencimiento)}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-              </table>
+      <div className="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <Card className="border-zinc-800/50 bg-card shadow-none ring-0">
+          <CardHeader>
+            <PremiumCardTitle>PRÓXIMOS EGRESOS</PremiumCardTitle>
+            <CardDescription className="text-sm text-zinc-500">
+              Movimientos pendientes de egreso.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="px-2 sm:px-4">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <Label htmlFor="buscar-egresos-pendientes" className="sr-only">
+                Buscar en próximos egresos
+              </Label>
+              <div className="relative w-full sm:max-w-sm">
+                <Search
+                  className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500"
+                  aria-hidden
+                />
+                <Input
+                  id="buscar-egresos-pendientes"
+                  type="search"
+                  value={busquedaEgresosPendientes}
+                  onChange={(e) => setBusquedaEgresosPendientes(e.target.value)}
+                  placeholder="Buscar por concepto o detalle…"
+                  className="border-zinc-800 bg-zinc-950 pl-9 text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-offset-zinc-950"
+                  autoComplete="off"
+                />
+              </div>
+              {pendientesEgresos.length > 0 ? (
+                <p className="text-xs text-zinc-500 sm:text-right">
+                  {busquedaEgresosPendientes.trim()
+                    ? `${pendientesEgresosMostrados.length} resultado${pendientesEgresosMostrados.length === 1 ? "" : "s"} (sobre ${pendientesEgresos.length} egresos pendientes)`
+                    : `Mostrando ${pendientesEgresosMostrados.length} de ${pendientesEgresos.length} (los 5 más próximos)`}
+                </p>
+              ) : null}
             </div>
-          </div>
-        </CardContent>
-      </Card>
+            <div className="overflow-x-auto w-full pb-2">
+              <div className="min-w-[640px]">
+                <Table className="table-fixed w-full">
+                  <TableHeader>
+                    <TableRow className="border-zinc-800 hover:bg-zinc-800/40">
+                      <TableHead className={cn("w-[35%] px-4 text-left", LABEL_TECH)}>Concepto</TableHead>
+                      <TableHead className={cn("w-[20%] px-4 text-left", LABEL_TECH)}>Descripción</TableHead>
+                      <TableHead className={cn("w-[15%] px-4 text-left whitespace-nowrap", LABEL_TECH)}>Monto</TableHead>
+                      <TableHead className={cn("w-[20%] px-4 text-left whitespace-nowrap", LABEL_TECH)}>Vencimiento</TableHead>
+                      <TableHead className={cn("w-[10%] px-2 text-left whitespace-nowrap", LABEL_TECH)} />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {!hasCajaData && isCajaLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="px-4 py-8 text-left text-zinc-500">
+                          Cargando...
+                        </TableCell>
+                      </TableRow>
+                    ) : pendientesEgresos.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="px-4 py-8 text-left text-zinc-500">
+                          No hay egresos pendientes.
+                        </TableCell>
+                      </TableRow>
+                    ) : pendientesEgresosMostrados.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="px-4 py-8 text-left text-zinc-500">
+                          No hay resultados para &quot;{busquedaEgresosPendientes.trim()}&quot;. Probá con otro concepto o detalle.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      pendientesEgresosMostrados.map((row) => (
+                        <TableRow
+                          key={`egreso-${row.id}`}
+                          onClick={() => openEdit(row)}
+                          className="cursor-pointer border-zinc-800 hover:bg-muted/50"
+                        >
+                          <TableCell className="max-w-[220px] min-w-0 px-4 py-2">
+                            <p className="truncate font-medium text-zinc-100">{row.concepto}</p>
+                          </TableCell>
+                          <TableCell className="max-w-[220px] min-w-0 px-4 py-2">
+                            <p className="truncate text-zinc-300">{row.descripcion || "—"}</p>
+                          </TableCell>
+                          <TableCell className="px-4 py-2 text-left font-mono text-sm font-semibold tabular-nums text-[#e41b68] whitespace-nowrap">
+                            {formatPesos(signedAmount(row))}
+                          </TableCell>
+                          <TableCell className="px-4 py-2 text-left text-zinc-300 whitespace-nowrap">
+                            {row.fechaVencimiento ? isoToDisplay(row.fechaVencimiento) : "—"}
+                          </TableCell>
+                          <TableCell className="px-2 py-2 text-left whitespace-nowrap">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="text-[#5ab253] hover:text-[#82d47d]"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                openQuickSettle(row);
+                              }}
+                            >
+                              <Check className="size-4" aria-hidden />
+                              <span className="sr-only">Pagar movimiento</span>
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-zinc-800/50 bg-card shadow-none ring-0">
+          <CardHeader>
+            <PremiumCardTitle>COBROS PENDIENTES</PremiumCardTitle>
+            <CardDescription className="text-sm text-zinc-500">
+              Movimientos pendientes de ingreso.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="px-2 sm:px-4">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <Label htmlFor="buscar-cobros-pendientes" className="sr-only">
+                Buscar en cobros pendientes
+              </Label>
+              <div className="relative w-full sm:max-w-sm">
+                <Search
+                  className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500"
+                  aria-hidden
+                />
+                <Input
+                  id="buscar-cobros-pendientes"
+                  type="search"
+                  value={busquedaCobrosPendientes}
+                  onChange={(e) => setBusquedaCobrosPendientes(e.target.value)}
+                  placeholder="Buscar por socio…"
+                  className="border-zinc-800 bg-zinc-950 pl-9 text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-offset-zinc-950"
+                  autoComplete="off"
+                />
+              </div>
+              {cobrosPendientes.length > 0 ? (
+                <p className="text-xs text-zinc-500 sm:text-right">
+                  {busquedaCobrosPendientes.trim()
+                    ? `${cobrosPendientesMostrados.length} resultado${cobrosPendientesMostrados.length === 1 ? "" : "s"} (sobre ${cobrosPendientes.length} cobros pendientes)`
+                    : `Mostrando ${cobrosPendientesMostrados.length} de ${cobrosPendientes.length} (los 5 más próximos)`}
+                </p>
+              ) : null}
+            </div>
+            <div className="overflow-x-auto w-full pb-2">
+              <div className="min-w-[640px]">
+                <Table className="table-fixed w-full">
+                  <TableHeader>
+                    <TableRow className="border-zinc-800 hover:bg-zinc-800/40">
+                      <TableHead className={cn("w-[50%] px-4 text-left", LABEL_TECH)}>Socio</TableHead>
+                      <TableHead className={cn("w-[20%] px-4 text-left whitespace-nowrap", LABEL_TECH)}>Monto</TableHead>
+                      <TableHead className={cn("w-[20%] px-4 text-left whitespace-nowrap", LABEL_TECH)}>Vencimiento</TableHead>
+                      <TableHead className={cn("w-[10%] px-2 text-left whitespace-nowrap", LABEL_TECH)} />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {!hasCajaData && isCajaLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={4} className="px-4 py-8 text-left text-zinc-500">
+                          Cargando...
+                        </TableCell>
+                      </TableRow>
+                    ) : cobrosPendientes.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={4} className="px-4 py-8 text-left text-zinc-500">
+                          No hay cobros pendientes.
+                        </TableCell>
+                      </TableRow>
+                    ) : cobrosPendientesMostrados.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={4} className="px-4 py-8 text-left text-zinc-500">
+                          No hay resultados para &quot;{busquedaCobrosPendientes.trim()}&quot;. Probá con otro nombre de socio.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      cobrosPendientesMostrados.map((row) => (
+                        <TableRow
+                          key={`ingreso-${row.id}`}
+                          onClick={() => openEdit(row)}
+                          className="cursor-pointer border-zinc-800 hover:bg-muted/50"
+                        >
+                          <TableCell className="max-w-[150px] min-w-0 px-4 py-2">
+                            <p className="truncate font-medium text-zinc-100">
+                              {row.socio || "Socio sin nombre"}
+                            </p>
+                            <p className="truncate text-xs text-zinc-500">
+                              {row.concepto}
+                              {row.descripcion ? ` · ${row.descripcion}` : ""}
+                            </p>
+                          </TableCell>
+                          <TableCell className="max-w-[140px] px-4 py-2 text-left font-mono text-sm font-semibold tabular-nums text-[#5ab253] whitespace-nowrap">
+                            {formatPesos(signedAmount(row))}
+                          </TableCell>
+                          <TableCell className="px-4 py-2 text-left text-zinc-300 whitespace-nowrap">
+                            {row.fechaVencimiento ? isoToDisplay(row.fechaVencimiento) : "—"}
+                          </TableCell>
+                          <TableCell className="px-2 py-2 text-left whitespace-nowrap">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="text-[#5ab253] hover:text-[#82d47d]"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                openQuickSettle(row);
+                              }}
+                            >
+                              <Check className="size-4" aria-hidden />
+                              <span className="sr-only">Cobrar movimiento</span>
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
 
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3 lg:gap-8">
         <Card className="border-zinc-800/50 bg-card shadow-none ring-0 lg:col-span-2">
@@ -1041,46 +1305,34 @@ export default function AdministracionPage() {
                 Tocá una fila para editar en el panel lateral.
               </CardDescription>
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              aria-pressed={filtroProximosVencimientos}
-              onClick={() => setFiltroProximosVencimientos((prev) => !prev)}
-              className={cn(
-                "gap-2 border-amber-400/45 bg-zinc-900 text-amber-300 hover:bg-amber-400/10 hover:text-amber-200",
-                filtroProximosVencimientos && "border-amber-400 bg-amber-400/15 ring-2 ring-amber-400/30",
-              )}
-            >
-              Próximos vencimientos
-            </Button>
           </CardHeader>
           <CardContent className="px-2 sm:px-4">
             <div className="overflow-x-auto w-full pb-2">
-              <div className="min-w-[760px]">
-                <Table>
+              <div className="min-w-[640px]">
+                <Table className="table-auto w-auto min-w-full">
               <TableHeader>
                 <TableRow className="border-zinc-800 hover:bg-zinc-800/40">
-                  <TableHead className={cn("w-10", LABEL_TECH)} />
+                  <TableHead className={cn("w-10 text-left", LABEL_TECH)} />
                   <TableHead className={LABEL_TECH}>Fecha</TableHead>
                   <TableHead className={LABEL_TECH}>Concepto</TableHead>
                   <TableHead className={LABEL_TECH}>Categoría</TableHead>
-                  <TableHead className={cn("text-right", LABEL_TECH)}>
+                  <TableHead className={cn("text-left", LABEL_TECH)}>
                     Monto
                   </TableHead>
                   <TableHead className={LABEL_TECH}>Estado</TableHead>
-                  <TableHead className={cn("text-right", LABEL_TECH)}>Acciones</TableHead>
+                  <TableHead className={cn("text-left", LABEL_TECH)} />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {!hasCajaData && isCajaLoading ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="py-8 text-center text-zinc-500">
+                    <TableCell colSpan={7} className="py-8 text-left text-zinc-500">
                       Cargando...
                     </TableCell>
                   </TableRow>
                 ) : filtrados.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="py-8 text-center text-zinc-500">
+                    <TableCell colSpan={7} className="py-8 text-left text-zinc-500">
                       No hay movimientos registrados.
                     </TableCell>
                   </TableRow>
@@ -1135,7 +1387,7 @@ export default function AdministracionPage() {
                       </TableCell>
                       <TableCell
                         className={cn(
-                          "text-right font-mono text-sm font-semibold tabular-nums",
+                          "text-left font-mono text-sm font-semibold tabular-nums",
                           row.categoria === "Ingreso"
                             ? "text-[#5ab253]"
                             : "text-[#e41b68]",
@@ -1165,8 +1417,8 @@ export default function AdministracionPage() {
                             </Badge>
                           )}
                         </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-1">
+                      <TableCell className="text-left">
+                        <div className="flex items-center gap-1">
                           <Button
                             type="button"
                             variant="ghost"
@@ -1955,6 +2207,68 @@ export default function AdministracionPage() {
               }}
             >
               Eliminar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={quickSettleOpen}
+        onOpenChange={(open) => {
+          setQuickSettleOpen(open);
+          if (!open) {
+            setQuickSettleTarget(null);
+            setQuickSettleFormaPagoId("");
+          }
+        }}
+      >
+        <DialogContent className="border-zinc-800 bg-zinc-950 text-zinc-100">
+          <DialogHeader>
+            <DialogTitle>
+              {quickSettleTarget?.categoria === "Ingreso" ? "Cobrar pendiente" : "Pagar pendiente"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <p className="text-sm text-zinc-400">
+              Seleccioná la forma de pago para marcar el movimiento como pagado.
+            </p>
+            <Select
+              value={quickSettleFormaPagoId || undefined}
+              onValueChange={setQuickSettleFormaPagoId}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Seleccionar forma de pago" />
+              </SelectTrigger>
+              <SelectContent>
+                {safeFormaPagoOptions.map((fp) => (
+                  <SelectItem key={String(fp.id)} value={String(fp.id)}>
+                    {fp.nombre}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-zinc-700"
+              onClick={() => {
+                setQuickSettleOpen(false);
+                setQuickSettleTarget(null);
+                setQuickSettleFormaPagoId("");
+              }}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              disabled={isQuickSettling || !quickSettleFormaPagoId}
+              className="bg-[#5ab253] text-white hover:bg-[#5ab253]/90"
+              onClick={() => {
+                void confirmQuickSettle();
+              }}
+            >
+              {isQuickSettling ? "Procesando..." : "Confirmar"}
             </Button>
           </DialogFooter>
         </DialogContent>

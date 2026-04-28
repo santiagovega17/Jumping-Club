@@ -21,17 +21,25 @@ type ObtenerMovimientosRecientesInput = RangoFechas & {
 type CrearMovimientoCajaInput = {
   userId: string;
   tipo: "ingreso" | "egreso";
+  estado?: "pagado" | "pendiente";
   monto: number;
   conceptoId: string;
   formaPagoId: string;
   socioId?: string | null;
   fecha: string;
+  fechaVencimiento?: string | null;
   observaciones?: string | null;
 };
 
 type DeleteMovimientoCajaInput = {
   userId: string;
   movimientoId: string;
+};
+
+type MarcarMovimientoPagadoInput = {
+  userId: string;
+  movimientoId: string;
+  formaPagoId: string;
 };
 
 type GenerarCuotasPendientesResult = {
@@ -126,12 +134,15 @@ export async function obtenerBalanceCaja(input: RangoFechas) {
           if (tipo === "egreso") acc.egresos += monto;
         }
         if (estado === "pendiente") {
-          acc.pendientes += monto;
+          if (tipo === "ingreso") acc.pendientesIngresos += monto;
+          if (tipo === "egreso") acc.pendientesEgresos += monto;
         }
         return acc;
       },
-      { ingresos: 0, egresos: 0, pendientes: 0 },
+      { ingresos: 0, egresos: 0, pendientesIngresos: 0, pendientesEgresos: 0 },
     );
+
+    const pendientes = balance.pendientesIngresos - balance.pendientesEgresos;
 
     return {
       ok: true as const,
@@ -139,7 +150,7 @@ export async function obtenerBalanceCaja(input: RangoFechas) {
         ingresos: balance.ingresos,
         egresos: balance.egresos,
         saldo: balance.ingresos - balance.egresos,
-        pendientes: balance.pendientes,
+        pendientes,
       },
     };
   } catch (error) {
@@ -251,14 +262,18 @@ export async function crearMovimientoCajaAction(input: CrearMovimientoCajaInput)
       return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };
     }
 
+    const estado = input.estado ?? "pagado";
     const payload: Database["public"]["Tables"]["movimientos_caja"]["Insert"] = {
       franquicia_id: franquiciaId,
       tipo: input.tipo,
+      estado,
       monto: input.monto,
       concepto_id: input.conceptoId,
       forma_pago_id: input.formaPagoId,
       socio_id: input.socioId ?? null,
       fecha: input.fecha,
+      fecha_vencimiento:
+        estado === "pendiente" ? input.fechaVencimiento ?? input.fecha : null,
       observaciones: input.observaciones ?? null,
     };
 
@@ -274,6 +289,7 @@ export async function crearMovimientoCajaAction(input: CrearMovimientoCajaInput)
 
     if (
       input.tipo === "ingreso" &&
+      estado === "pagado" &&
       input.socioId &&
       input.conceptoId
     ) {
@@ -384,6 +400,99 @@ export async function deleteMovimientoCajaAction(input: DeleteMovimientoCajaInpu
     return {
       ok: false as const,
       error: error instanceof Error ? error.message : "No se pudo eliminar el movimiento",
+    };
+  }
+}
+
+export async function marcarMovimientoPagadoAction(input: MarcarMovimientoPagadoInput) {
+  try {
+    const admin = getAdminClient();
+    if (!admin) return { ok: false as const, error: "Faltan variables de entorno de Supabase" };
+    if (!input.movimientoId || !input.formaPagoId) {
+      return { ok: false as const, error: "Movimiento o forma de pago inválidos" };
+    }
+
+    const { franquiciaId, error: franquiciaError } = await resolveFranquiciaId(input.userId, admin);
+    if (franquiciaError || !franquiciaId) {
+      return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };
+    }
+
+    const { data: movimiento, error: movimientoError } = await admin
+      .from("movimientos_caja")
+      .select("id,estado,tipo,concepto_id,socio_id")
+      .eq("id", input.movimientoId)
+      .eq("franquicia_id", franquiciaId)
+      .maybeSingle();
+    if (movimientoError || !movimiento?.id) {
+      return { ok: false as const, error: movimientoError?.message ?? "Movimiento no encontrado" };
+    }
+    if (String(movimiento.estado ?? "").toLowerCase() !== "pendiente") {
+      return { ok: false as const, error: "Solo se pueden cobrar/pagar movimientos pendientes" };
+    }
+
+    const { error: updateError } = await admin
+      .from("movimientos_caja")
+      .update({
+        estado: "pagado",
+        forma_pago_id: input.formaPagoId,
+        fecha: new Date().toISOString(),
+      })
+      .eq("id", input.movimientoId)
+      .eq("franquicia_id", franquiciaId);
+    if (updateError) return { ok: false as const, error: updateError.message };
+
+    if (movimiento.tipo === "ingreso" && movimiento.socio_id && movimiento.concepto_id) {
+      const { data: conceptoRow, error: conceptoError } = await admin
+        .from("conceptos_caja")
+        .select("concepto")
+        .eq("id", movimiento.concepto_id)
+        .eq("franquicia_id", franquiciaId)
+        .maybeSingle();
+
+      const esPagoCuota = (conceptoRow?.concepto?.trim() ?? "").toLowerCase() === "pago de cuota";
+      if (!conceptoError && esPagoCuota) {
+        const today = new Date();
+        const todayIso = today.toISOString().slice(0, 10);
+        const fechaVencimiento = new Date(today);
+        fechaVencimiento.setDate(fechaVencimiento.getDate() + 30);
+        const fechaVencimientoIso = fechaVencimiento.toISOString().slice(0, 10);
+
+        const { error: socioUpdateWithVencError } = await admin
+          .from("socios")
+          .update({
+            estado: "activo",
+            fecha_vencimiento: fechaVencimientoIso,
+            mes_ultimo_aumento: todayIso.slice(0, 7),
+          } as unknown as Database["public"]["Tables"]["socios"]["Update"])
+          .eq("id", movimiento.socio_id)
+          .eq("franquicia_id", franquiciaId);
+
+        if (socioUpdateWithVencError) {
+          const { error: socioUpdateError } = await admin
+            .from("socios")
+            .update({ estado: "activo" })
+            .eq("id", movimiento.socio_id)
+            .eq("franquicia_id", franquiciaId);
+          if (socioUpdateError) {
+            return {
+              ok: false as const,
+              error:
+                "Se marcó el movimiento como pagado, pero no se pudo actualizar el estado del socio.",
+            };
+          }
+        }
+      }
+    }
+
+    revalidatePath("/administracion");
+    revalidatePath("/dashboard");
+    revalidatePath("/socios");
+    return { ok: true as const };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error:
+        error instanceof Error ? error.message : "No se pudo actualizar el estado del movimiento",
     };
   }
 }

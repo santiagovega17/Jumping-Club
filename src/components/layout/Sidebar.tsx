@@ -119,6 +119,7 @@ export function Sidebar({ className, fixed = true, onNavigate }: SidebarProps) {
           setIsSigningOut(true);
           if (typeof window !== "undefined") {
             window.sessionStorage.removeItem("userRole");
+            window.sessionStorage.removeItem("jumpingClubUserId");
             window.localStorage.removeItem("jumpingClubRole");
           }
           onNavigate?.();
