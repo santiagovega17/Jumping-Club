@@ -2,6 +2,7 @@
 
 import { type FormEvent, type MouseEvent, useEffect, useMemo, useState, useTransition } from "react";
 import useSWR from "swr";
+import { usePathname } from "next/navigation";
 import { AlertTriangle, Filter, Plus, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +55,8 @@ import {
   updateSocioAction,
 } from "@/actions/socios";
 import { crearMovimientoCajaAction } from "@/actions/caja";
+import { getSpectatorFranquiciaId } from "@/lib/spectator-mode";
+import { formatPlanLabel } from "@/lib/plan-label";
 
 type Role = "administracion" | "socio";
 
@@ -223,28 +226,6 @@ function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function formatIsoToDisplay(iso: string) {
-  if (!iso) return formatHoy();
-  const parts = iso.split("-");
-  if (parts.length !== 3) return formatHoy();
-  const [y, m, d] = parts;
-  return `${d}/${m}/${y}`;
-}
-
-function formatHoy() {
-  return new Intl.DateTimeFormat("es-AR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  }).format(new Date());
-}
-
-function parseDisplayToIso(display: string): string | null {
-  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(display.trim());
-  if (!m) return null;
-  return `${m[3]}-${m[2]}-${m[1]}`;
-}
-
 function EstadoBadge({ estado }: { estado: MembresiaEstado }) {
   if (estado === "Inactivo") {
     return (
@@ -352,6 +333,9 @@ type CobroForm = {
 };
 
 export default function SociosPage() {
+  const pathname = usePathname();
+  const spectatorFranquiciaId = getSpectatorFranquiciaId(pathname);
+  const isReadOnly = Boolean(spectatorFranquiciaId);
   const [role] = useState<Role>(() => {
     if (typeof window === "undefined") return "administracion";
     const stored = window.localStorage.getItem("jumpingClubRole");
@@ -394,47 +378,51 @@ export default function SociosPage() {
     "socios-catalogos",
     async () => {
       const supabase = createSupabaseClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return null;
-      const { data: perfil, error: perfilError } = await supabase
-        .from("perfiles")
-        .select("franquicia_id")
-        .eq("id", user.id)
-        .single();
-      if (perfilError || !perfil?.franquicia_id) return null;
+      let scopeFranquiciaId = spectatorFranquiciaId;
+      if (!scopeFranquiciaId) {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return null;
+        const { data: perfil, error: perfilError } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+        if (perfilError || !perfil?.franquicia_id) return null;
+        scopeFranquiciaId = perfil.franquicia_id;
+      }
 
       const [{ data: planes }, { data: instructores }, { data: formas }, { data: conceptos }] =
         await Promise.all([
           supabase
             .from("planes")
             .select("id,nombre,precio,franquicia_id,estado")
-            .eq("franquicia_id", perfil.franquicia_id)
+            .eq("franquicia_id", scopeFranquiciaId)
             .eq("estado", "activo")
             .order("nombre", { ascending: true }),
           supabase
             .from("instructores")
             .select("id,nombre")
-            .eq("franquicia_id", perfil.franquicia_id)
+            .eq("franquicia_id", scopeFranquiciaId)
             .eq("estado", "activo")
             .order("nombre", { ascending: true }),
           supabase
             .from("formas_pago")
             .select("id,nombre")
-            .eq("franquicia_id", perfil.franquicia_id)
+            .eq("franquicia_id", scopeFranquiciaId)
             .eq("activo", true)
             .order("nombre", { ascending: true }),
           supabase
             .from("conceptos_caja")
             .select("id,concepto,descripcion")
-            .eq("franquicia_id", perfil.franquicia_id)
+            .eq("franquicia_id", scopeFranquiciaId)
             .eq("tipo", "ingreso")
             .order("concepto", { ascending: true }),
         ]);
 
       return {
-        franquiciaId: perfil.franquicia_id,
+        franquiciaId: scopeFranquiciaId,
         planes: (planes ?? []) as PlanOption[],
         instructores: (instructores ?? []) as InstructorOption[],
         formas: (formas ?? []) as FormaPagoOption[],
@@ -493,7 +481,7 @@ export default function SociosPage() {
 
       return ((rows ?? []) as SocioRow[])
         .map((row) => {
-        const planLabel = row.plan?.nombre ?? "Sin plan";
+        const planLabel = formatPlanLabel(row.plan?.nombre);
         const precio = Number(row.plan?.precio ?? 0);
         return {
           socioId: row.id,
@@ -528,7 +516,7 @@ export default function SociosPage() {
     },
     { revalidateOnFocus: false, keepPreviousData: true },
   );
-  const socios = sociosData ?? [];
+  const socios = useMemo(() => sociosData ?? [], [sociosData]);
 
   const socioDetail = useMemo(
     () => socios.find((s) => s.socioId === selectedSocioId) ?? null,
@@ -583,7 +571,7 @@ export default function SociosPage() {
       return {
         ...f,
         planId: f.planId || defaultPlan?.id || "",
-        plan: f.plan || defaultPlan?.nombre || "",
+        plan: f.plan || formatPlanLabel(defaultPlan?.nombre) || "",
         precioActual:
           f.precioActual !== "0" ? f.precioActual : String(defaultPlan?.precio ?? 0),
         instructorId: f.instructorId || defaultInstructor?.id || "",
@@ -681,11 +669,14 @@ export default function SociosPage() {
   };
 
   const guardarEdicion = async () => {
+    if (isReadOnly) return;
     if (!draft || !selectedSocioId || !adminFranquiciaId) {
       toast.error("No se pudo identificar el socio a editar");
       return;
     }
-    const selectedPlan = planesActivos.find((p) => p.nombre === draft.plan);
+    const selectedPlan = planesActivos.find(
+      (p) => formatPlanLabel(p.nombre) === draft.plan,
+    );
     const selectedInstructor = instructoresActivos.find(
       (i) => i.nombre === draft.vendedor,
     );
@@ -733,12 +724,14 @@ export default function SociosPage() {
   };
 
   const onStartEditing = (e: MouseEvent<HTMLButtonElement>) => {
+    if (isReadOnly) return;
     e.preventDefault();
     e.stopPropagation();
     setIsEditingSocio(true);
   };
 
   const guardarNuevoSocio = () => {
+    if (isReadOnly) return;
     if (
       !nuevoForm.nombre.trim() ||
       !nuevoForm.dni.trim() ||
@@ -778,6 +771,7 @@ export default function SociosPage() {
   };
 
   const registrarCobro = async () => {
+    if (isReadOnly) return;
     if (!selectedSocioId || !adminFranquiciaId) {
       toast.error("No se pudo identificar el socio");
       return;
@@ -833,6 +827,7 @@ export default function SociosPage() {
   };
 
   const confirmarBaja = async () => {
+    if (isReadOnly) return;
     if (!selectedSocioId || !motivoBaja.trim()) return;
     const result = await toggleEstadoSocioAction({
       socioId: selectedSocioId,
@@ -850,6 +845,7 @@ export default function SociosPage() {
   };
 
   const reactivarSocio = async () => {
+    if (isReadOnly) return;
     if (!selectedSocioId) return;
     const result = await toggleEstadoSocioAction({
       socioId: selectedSocioId,
@@ -902,7 +898,7 @@ export default function SociosPage() {
   );
   const mesesSinAumento = vista ? Math.max(0, monthDiff(vista.mesUltimoAumento, new Date())) : 0;
   const bloqueoAumento = mesesSinAumento < 3;
-  const socioFieldsDisabled = !isEditingSocio;
+  const socioFieldsDisabled = isReadOnly || !isEditingSocio;
 
   if (role !== "administracion") {
     return (
@@ -924,10 +920,14 @@ export default function SociosPage() {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="mb-8">
           <h1 className={PAGE_TITLE_CLASS}>Gestión de Socios</h1>
+          {isReadOnly ? (
+            <p className="mt-2 text-sm text-zinc-400">Modo espectador: solo lectura.</p>
+          ) : null}
         </div>
         <Button
           type="button"
           onClick={abrirNuevoSocio}
+          disabled={isReadOnly}
           className="h-10 shrink-0 bg-primary text-primary-foreground hover:bg-primary/90 sm:self-start"
         >
           <Plus className="size-4" aria-hidden />
@@ -1281,7 +1281,7 @@ export default function SociosPage() {
                   value={nuevoForm.planId}
                   onValueChange={(value) => {
                     const selected = planesActivos.find((p) => p.id === value);
-                    const planLabel = selected ? selected.nombre : "";
+                    const planLabel = selected ? formatPlanLabel(selected.nombre) : "";
                     setNuevoForm((f) => ({
                       ...f,
                       planId: value,
@@ -1303,7 +1303,7 @@ export default function SociosPage() {
                   <SelectContent>
                     {planesActivos.map((plan) => (
                       <SelectItem key={plan.id} value={plan.id}>
-                        {plan.nombre}
+                        {formatPlanLabel(plan.nombre)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -1405,7 +1405,7 @@ export default function SociosPage() {
               <Button
                 type="button"
                 onClick={guardarNuevoSocio}
-                disabled={isPending}
+                disabled={isPending || isReadOnly}
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 {isPending ? "Guardando..." : "Guardar Socio"}
@@ -1454,7 +1454,7 @@ export default function SociosPage() {
             </Button>
             <Button
               type="button"
-              disabled={!motivoBaja.trim()}
+              disabled={!motivoBaja.trim() || isReadOnly}
               onClick={confirmarBaja}
               className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
@@ -1687,7 +1687,7 @@ export default function SociosPage() {
                                     ...d,
                                     plan: value,
                                     precioActual:
-                                      planesActivos.find((p) => p.nombre === value)?.precio ??
+                                      planesActivos.find((p) => formatPlanLabel(p.nombre) === value)?.precio ??
                                       d.precioActual,
                                   }
                                 : d
@@ -1700,8 +1700,8 @@ export default function SociosPage() {
                           </SelectTrigger>
                           <SelectContent>
                             {planesActivos.map((plan) => (
-                              <SelectItem key={plan.id} value={plan.nombre}>
-                                {plan.nombre}
+                              <SelectItem key={plan.id} value={formatPlanLabel(plan.nombre)}>
+                                {formatPlanLabel(plan.nombre)}
                               </SelectItem>
                             ))}
                           </SelectContent>
@@ -1918,6 +1918,7 @@ export default function SociosPage() {
                             type="button"
                             onClick={registrarCobro}
                             disabled={
+                              isReadOnly ||
                               isSavingCobro ||
                               conceptosIngreso.length === 0 ||
                               formasPagoActivas.length === 0
@@ -1952,6 +1953,7 @@ export default function SociosPage() {
                           <Button
                             type="button"
                             className="order-2 bg-emerald-600 text-white hover:bg-emerald-500 sm:order-1"
+                            disabled={isReadOnly}
                             onClick={reactivarSocio}
                           >
                             Dar de alta
@@ -1960,6 +1962,7 @@ export default function SociosPage() {
                           <Button
                             type="button"
                             variant="outline"
+                            disabled={isReadOnly}
                             className="order-2 border-red-500/60 text-red-400 hover:bg-red-500/10 hover:text-red-300 sm:order-1"
                             onClick={() => setBajaOpen(true)}
                           >
@@ -1983,6 +1986,7 @@ export default function SociosPage() {
                       <Button
                         type={isEditingSocio ? "submit" : "button"}
                         form={isEditingSocio ? "socio-edit-form" : undefined}
+                        disabled={isReadOnly}
                         className="order-1 w-full bg-primary text-primary-foreground hover:bg-primary/90 sm:order-2 sm:ml-auto sm:w-auto"
                         onClick={isEditingSocio ? undefined : onStartEditing}
                       >

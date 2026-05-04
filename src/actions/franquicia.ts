@@ -80,21 +80,13 @@ export async function getFranquiciaDetalleByIdAction(franquiciaId: string) {
       return { ok: false as const, error: "Faltan variables de entorno de Supabase" };
     }
 
-    const { data: sucursalData, error: sucursalError } = await admin
-      .from("sucursales" as never)
+    const { data, error } = await admin
+      .from("franquicias")
       .select("id,nombre,direccion")
       .eq("id", franquiciaId)
       .single();
 
-    const { data, error } = sucursalError
-      ? await admin
-          .from("franquicias")
-          .select("id,nombre,direccion")
-          .eq("id", franquiciaId)
-          .single()
-      : { data: sucursalData, error: null };
-
-    if (error || !data) return { ok: false as const, error: error?.message ?? "Sucursal no encontrada" };
+    if (error || !data) return { ok: false as const, error: error?.message ?? "Franquicia no encontrada" };
 
     return {
       ok: true as const,

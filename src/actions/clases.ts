@@ -30,6 +30,12 @@ type DesinscribirSocioDeClaseInput = {
   claseId: string;
 };
 
+type GetCalendarioFranquiciaDataInput = {
+  franquiciaId: string;
+  year: number;
+  month: number;
+};
+
 function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -140,7 +146,7 @@ export async function inscribirSocioEnClase(input: InscribirSocioEnClaseInput) {
 
     const { data: socio, error: socioError } = await admin
       .from("socios")
-      .select("id,estado,franquicia_id")
+      .select("id,estado,franquicia_id,plan:planes(id,nombre,clases_por_semana)")
       .eq("id", input.socioId)
       .maybeSingle();
     if (socioError || !socio?.id) {
@@ -149,7 +155,7 @@ export async function inscribirSocioEnClase(input: InscribirSocioEnClaseInput) {
 
     const { data: clase, error: claseError } = await admin
       .from("clases")
-      .select("id,cupo_maximo,reservas_actuales,franquicia_id")
+      .select("id,cupo_maximo,reservas_actuales,franquicia_id,fecha_hora")
       .eq("id", input.claseId)
       .single();
     if (claseError || !clase) {
@@ -201,26 +207,70 @@ export async function inscribirSocioEnClase(input: InscribirSocioEnClaseInput) {
       return { ok: false as const, error: "Cupo lleno" };
     }
 
-    const adminAny = admin as unknown as {
-      from: (table: string) => {
-        select: (columns: string) => any;
-        insert: (values: Record<string, unknown>) => any;
-      };
-    };
-
-    const { data: existente, error: existeError } = await adminAny
-      .from("inscripciones")
+    const { data: existente, error: existeError } = await admin
+      .from("inscripciones" as never)
       .select("id")
       .eq("clase_id", input.claseId)
       .eq("socio_id", input.socioId)
       .maybeSingle();
     if (existeError) return { ok: false as const, error: existeError.message };
-    if (existente?.id) return { ok: true as const };
+    if ((existente as { id?: string } | null)?.id) return { ok: true as const };
 
-    const { error: inscripcionError } = await adminAny.from("inscripciones").insert({
+    const maxSemanal = Number(
+      (
+        socio as {
+          plan?: { clases_por_semana?: number | null; nombre?: string | null } | null;
+        }
+      ).plan?.clases_por_semana ?? 0,
+    );
+    if (Number.isFinite(maxSemanal) && maxSemanal > 0) {
+      const claseDate = new Date(String(clase.fecha_hora ?? ""));
+      if (!Number.isNaN(claseDate.getTime())) {
+        const weekday = claseDate.getDay();
+        const diffToMonday = weekday === 0 ? -6 : 1 - weekday;
+        const weekStart = new Date(claseDate);
+        weekStart.setHours(0, 0, 0, 0);
+        weekStart.setDate(weekStart.getDate() + diffToMonday);
+        const weekEnd = new Date(weekStart);
+        weekEnd.setDate(weekStart.getDate() + 7);
+
+        const { data: inscripcionesSemana, error: inscripcionesSemanaError } = await admin
+          .from("inscripciones" as never)
+          .select("clase:clases(fecha_hora,estado)")
+          .eq("socio_id", input.socioId);
+        if (inscripcionesSemanaError) {
+          return { ok: false as const, error: inscripcionesSemanaError.message };
+        }
+
+        const usadas = ((inscripcionesSemana ?? []) as Array<{
+          clase?: { fecha_hora?: string | null; estado?: string | null } | null;
+        }>)
+          .map((row) => row.clase)
+          .filter(
+            (claseRow): claseRow is { fecha_hora?: string | null; estado?: string | null } =>
+              Boolean(claseRow),
+          )
+          .filter((claseRow) => {
+            const estado = String(claseRow.estado ?? "").toLowerCase();
+            if (estado === "cancelada") return false;
+            const t = Date.parse(String(claseRow.fecha_hora ?? ""));
+            if (!Number.isFinite(t)) return false;
+            return t >= weekStart.getTime() && t < weekEnd.getTime();
+          }).length;
+
+        if (usadas >= maxSemanal) {
+          return {
+            ok: false as const,
+            error: `Tu plan permite hasta ${maxSemanal} inscripciones por semana.`,
+          };
+        }
+      }
+    }
+
+    const { error: inscripcionError } = await admin.from("inscripciones" as never).insert({
       clase_id: input.claseId,
       socio_id: input.socioId,
-    });
+    } as never);
     if (inscripcionError) return { ok: false as const, error: inscripcionError.message };
 
     const { error: updateError } = await admin
@@ -250,14 +300,8 @@ export async function getInscriptosPorClaseAction(claseId: string) {
     }
     if (!claseId) return { ok: true as const, data: [] as Array<{ socioId: string; nombre: string }> };
 
-    const adminAny = admin as unknown as {
-      from: (table: string) => {
-        select: (columns: string) => any;
-      };
-    };
-
-    const { data, error } = await adminAny
-      .from("inscripciones")
+    const { data, error } = await admin
+      .from("inscripciones" as never)
       .select("socio_id,socio:socios(id,perfil:perfiles(nombre))")
       .eq("clase_id", claseId)
       .order("nombre", { ascending: true, foreignTable: "socio.perfil" });
@@ -367,6 +411,91 @@ export async function desinscribirSocioDeClaseAction(input: DesinscribirSocioDeC
     return {
       ok: false as const,
       error: error instanceof Error ? error.message : "No se pudo completar la baja",
+    };
+  }
+}
+
+export async function getCalendarioFranquiciaDataAction(input: GetCalendarioFranquiciaDataInput) {
+  try {
+    const admin = getAdminClient();
+    if (!admin) {
+      return { ok: false as const, error: "Faltan variables de entorno de Supabase" };
+    }
+    if (!input.franquiciaId) {
+      return { ok: false as const, error: "Franquicia inválida" };
+    }
+
+    const firstDay = new Date(input.year, input.month, 1);
+    const lastDay = new Date(input.year, input.month + 1, 0);
+    const from = `${firstDay.toISOString().slice(0, 10)}T00:00:00`;
+    const to = `${lastDay.toISOString().slice(0, 10)}T23:59:59`;
+
+    const [{ data: instRows }, { data: tplRows }, { data: claseRows }, { data: canceladasRows }] =
+      await Promise.all([
+        admin
+          .from("instructores")
+          .select("id,nombre")
+          .eq("franquicia_id", input.franquiciaId)
+          .order("nombre", { ascending: true }),
+        admin
+          .from("plantillas_clases")
+          .select("id,nombre,instructor_id,horario,dia_semana,valid_from,valid_to")
+          .eq("franquicia_id", input.franquiciaId)
+          .eq("activo", true)
+          .order("horario", { ascending: true }),
+        admin
+          .from("clases")
+          .select("id,nombre,instructor_id,fecha_hora,cupo_maximo,reservas_actuales,estado")
+          .eq("franquicia_id", input.franquiciaId)
+          .eq("estado", "activa")
+          .gte("fecha_hora", from)
+          .lte("fecha_hora", to)
+          .order("fecha_hora", { ascending: true }),
+        admin
+          .from("clases")
+          .select("nombre,instructor_id,fecha_hora")
+          .eq("franquicia_id", input.franquiciaId)
+          .eq("estado", "cancelada")
+          .gte("fecha_hora", from)
+          .lte("fecha_hora", to),
+      ]);
+
+    return {
+      ok: true as const,
+      data: {
+        instructores: (instRows ?? []).map((x) => ({
+          id: x.id ?? "",
+          nombre: x.nombre ?? "",
+        })),
+        templates: (tplRows ?? []).map((x) => ({
+          id: x.id,
+          nombre: x.nombre,
+          instructorId: x.instructor_id,
+          horario: x.horario,
+          diaSemana: x.dia_semana,
+          validFrom: x.valid_from ?? null,
+          validTo: x.valid_to ?? null,
+        })),
+        programadas: (claseRows ?? []).map((row) => ({
+          id: row.id,
+          nombre: row.nombre ?? "",
+          instructorId: row.instructor_id ?? "",
+          fechaHora: row.fecha_hora,
+          cupoMaximo: row.cupo_maximo ?? 20,
+          reservasActuales: row.reservas_actuales ?? 0,
+          estado: row.estado ?? "activa",
+        })),
+        canceladas: (canceladasRows ?? []).map((row) => ({
+          nombre: row.nombre ?? "",
+          instructorId: row.instructor_id ?? "",
+          fechaHora: row.fecha_hora,
+        })),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: error instanceof Error ? error.message : "No se pudo obtener el calendario",
     };
   }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -45,7 +45,7 @@ type SidebarProps = {
 export function Sidebar({ className, fixed = true, onNavigate }: SidebarProps) {
   const pathname = usePathname();
   const [isSigningOut, setIsSigningOut] = useState(false);
-  const [role, setRole] = useState<Role>(() => {
+  const [role] = useState<Role>(() => {
     if (typeof window === "undefined") return "admin";
     const storedRole = window.sessionStorage.getItem("userRole");
     return storedRole === "admin" || storedRole === "socio"
@@ -63,13 +63,6 @@ export function Sidebar({ className, fixed = true, onNavigate }: SidebarProps) {
           active: "border-secondary bg-secondary/15 text-secondary",
           icon: "text-secondary",
         };
-
-  useEffect(() => {
-    const storedRole = window.sessionStorage.getItem("userRole");
-    if (storedRole === "admin" || storedRole === "socio") {
-      setRole(storedRole);
-    }
-  }, []);
 
   return (
     <aside

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
+import { usePathname } from "next/navigation";
 import { CheckCircle2, Pencil, Plus, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -45,11 +46,13 @@ import { es } from "date-fns/locale";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import {
   desinscribirSocioDeClaseAction,
+  getCalendarioFranquiciaDataAction,
   getClaseHistorialAction,
   getInscriptosPorClaseAction,
   inscribirSocioEnClase,
   updateClaseWithHistoryAction,
 } from "@/actions/clases";
+import { getSpectatorFranquiciaId } from "@/lib/spectator-mode";
 
 const capacidadTotal = 20;
 type Role = "administracion" | "socio";
@@ -228,6 +231,9 @@ function dayIdToWeekday(dayId: DayId) {
 }
 
 export default function CalendarioPage() {
+  const pathname = usePathname();
+  const spectatorFranquiciaId = getSpectatorFranquiciaId(pathname);
+  const isReadOnly = Boolean(spectatorFranquiciaId);
   const diasSelector = useMemo(() => getDiasSelector(), []);
   const [role] = useState<Role>(() => {
     if (typeof window === "undefined") return "administracion";
@@ -281,7 +287,10 @@ export default function CalendarioPage() {
       const parsed = JSON.parse(raw) as {
         schedules?: Record<DayId, DaySchedule>;
       };
-      if (parsed.schedules) setSchedulesConfig(parsed.schedules);
+      if (parsed.schedules) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setSchedulesConfig(parsed.schedules);
+      }
     } catch {
       setSchedulesConfig(null);
     }
@@ -295,17 +304,23 @@ export default function CalendarioPage() {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return null;
-      const { data: perfil } = await supabase
-        .from("perfiles")
-        .select("franquicia_id")
-        .eq("id", user.id)
-        .single();
-      if (!perfil?.franquicia_id) return null;
-      const { data: instRows } = await supabase
-        .from("instructores")
-        .select("id,nombre")
-        .eq("franquicia_id", perfil.franquicia_id)
-        .order("nombre", { ascending: true });
+      let scopeFranquiciaId = spectatorFranquiciaId;
+      if (!scopeFranquiciaId) {
+        const { data: perfil } = await supabase
+          .from("perfiles")
+          .select("franquicia_id")
+          .eq("id", user.id)
+          .single();
+        if (!perfil?.franquicia_id) return null;
+        scopeFranquiciaId = perfil.franquicia_id;
+      }
+      const { data: instRows } = spectatorFranquiciaId
+        ? { data: [] as Array<{ id: string; nombre: string }> }
+        : await supabase
+            .from("instructores")
+            .select("id,nombre")
+            .eq("franquicia_id", scopeFranquiciaId)
+            .order("nombre", { ascending: true });
       const { data: socioRow } = await supabase
         .from("socios")
         .select("id,estado")
@@ -315,7 +330,7 @@ export default function CalendarioPage() {
       const { data: franquiciaRow } = await supabase
         .from("franquicias")
         .select("minutos_limite_baja_inscripcion")
-        .eq("id", perfil.franquicia_id)
+        .eq("id", scopeFranquiciaId)
         .maybeSingle();
       const minutosLimiteBajaInscripcion = Number(
         franquiciaRow?.minutos_limite_baja_inscripcion ?? 30,
@@ -323,7 +338,7 @@ export default function CalendarioPage() {
 
       return {
         userId: user.id,
-        franquiciaId: perfil.franquicia_id,
+        franquiciaId: scopeFranquiciaId,
         socioId: socioRow?.id ?? null,
         socioEstado: socioRow?.estado ?? null,
         minutosLimiteBajaInscripcion: Number.isFinite(minutosLimiteBajaInscripcion)
@@ -340,6 +355,7 @@ export default function CalendarioPage() {
 
   useEffect(() => {
     if (!calendarContext) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAdminFranquiciaId(calendarContext.franquiciaId);
     setCurrentSocioId(calendarContext.socioId);
     setCurrentSocioEstado(calendarContext.socioEstado);
@@ -347,6 +363,7 @@ export default function CalendarioPage() {
   }, [calendarContext]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSocioInscripcionAdminId("");
   }, [selectedClaseId]);
 
@@ -360,6 +377,22 @@ export default function CalendarioPage() {
       ? ["calendario-data", adminFranquiciaId, selectedDate.getFullYear(), selectedDate.getMonth()]
       : null,
     async () => {
+      if (isReadOnly) {
+        const result = await getCalendarioFranquiciaDataAction({
+          franquiciaId: adminFranquiciaId!,
+          year: selectedDate.getFullYear(),
+          month: selectedDate.getMonth(),
+        });
+        if (!result.ok) {
+          throw new Error(result.error);
+        }
+        return {
+          templates: result.data.templates,
+          programadas: result.data.programadas,
+          canceladas: result.data.canceladas,
+          instructores: result.data.instructores,
+        };
+      }
       const supabase = createSupabaseClient();
       const firstDay = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1);
       const lastDay = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0);
@@ -422,6 +455,7 @@ export default function CalendarioPage() {
           instructorId: row.instructor_id ?? "",
           fechaHora: row.fecha_hora,
         })),
+        instructores: [],
       };
     },
     { revalidateOnFocus: false, keepPreviousData: true },
@@ -429,10 +463,19 @@ export default function CalendarioPage() {
 
   useEffect(() => {
     if (!calendarData) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setClasesTemplateConfig(calendarData.templates);
-    setClasesProgramadas(calendarData.programadas);
+    setClasesProgramadas(
+      calendarData.programadas.map((clase) => ({
+        ...clase,
+        estado: clase.estado === "cancelada" ? "cancelada" : "activa",
+      })),
+    );
     setClasesCanceladas(calendarData.canceladas);
-  }, [calendarData]);
+    if (isReadOnly) {
+      setInstructoresConfig(calendarData.instructores ?? []);
+    }
+  }, [calendarData, isReadOnly]);
 
   const reloadCalendarData = useCallback(async () => {
     await mutateCalendar();
@@ -606,7 +649,7 @@ export default function CalendarioPage() {
     isLoading: isLoadingSociosInscripcionAdmin,
     error: sociosInscripcionAdminError,
   } = useSWR<SocioListaInscripcionAdmin[]>(
-    role === "administracion" && adminFranquiciaId
+    role === "administracion" && adminFranquiciaId && !isReadOnly
       ? ["calendario-socios-inscripcion-admin", adminFranquiciaId]
       : null,
     async () => {
@@ -654,6 +697,7 @@ export default function CalendarioPage() {
   };
 
   const openNewClassSheet = () => {
+    if (isReadOnly) return;
     setClassSheetContext("new");
     setEditingClaseId(null);
     const tpl = clasesTemplateConfig[0];
@@ -671,6 +715,7 @@ export default function CalendarioPage() {
   };
 
   const openEditClassSheet = () => {
+    if (isReadOnly) return;
     if (!selectedClase || !selectedClase.classId) {
       toast.error("Selecciona una instancia real de clase para editar");
       return;
@@ -752,6 +797,7 @@ export default function CalendarioPage() {
   };
 
   const onInscribirSocioAdministrativo = useCallback(() => {
+    if (isReadOnly) return;
     const classId = selectedClase?.classId ?? null;
     const operatorUserId = calendarContext?.userId ?? null;
     if (!classId || !socioInscripcionAdminId) {
@@ -790,6 +836,7 @@ export default function CalendarioPage() {
     void run();
   }, [
     calendarContext?.userId,
+    isReadOnly,
     mutateInscriptosClase,
     reloadCalendarData,
     selectedClase,
@@ -798,7 +845,7 @@ export default function CalendarioPage() {
 
   const socioEstaInhabilitado = useMemo(() => {
     const estado = String(currentSocioEstado ?? "").toLowerCase();
-    return estado === "vencido" || estado === "inactivo";
+    return estado === "inactivo";
   }, [currentSocioEstado]);
 
   const socioYaIncriptoEnClase = useMemo(() => {
@@ -824,6 +871,7 @@ export default function CalendarioPage() {
 
   const minutosLimiteBajaInscripcion = calendarContext?.minutosLimiteBajaInscripcion ?? 30;
 
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const puedeDarDeBajaInscripcion = useMemo(() => {
     if (!socioYaIncriptoEnClase || !selectedClase?.classId || !selectedClase.fechaHora) {
       return false;
@@ -831,6 +879,7 @@ export default function CalendarioPage() {
     const inicioMs = Date.parse(selectedClase.fechaHora);
     if (!Number.isFinite(inicioMs)) return false;
     const limiteMs = Math.max(0, minutosLimiteBajaInscripcion) * 60 * 1000;
+    // eslint-disable-next-line react-hooks/purity
     return Date.now() < inicioMs - limiteMs;
   }, [
     minutosLimiteBajaInscripcion,
@@ -873,13 +922,13 @@ export default function CalendarioPage() {
   ]);
 
   const confirmarClaseSheet = () => {
+    if (isReadOnly) return;
     if (isSavingClase) return;
     setClassSubmitAttempted(true);
     setClassSubmitError(null);
     setClassFieldErrors({});
     const hRaw = sheetHora.trim();
     const nombreClase = sheetNombreClase.trim();
-    const daySchedule = selectedDayId ? schedulesConfig?.[selectedDayId] : null;
     const classSchema = z
       .object({
         nombre: z.string().trim().min(1, "Completá el nombre de la clase."),
@@ -991,6 +1040,7 @@ export default function CalendarioPage() {
   };
 
   const cancelarClaseSeleccionada = () => {
+    if (isReadOnly) return;
     if (!selectedClase || !selectedClase.classId) {
       toast.error("Selecciona una instancia real de clase para cancelar");
       return;
@@ -1028,6 +1078,9 @@ export default function CalendarioPage() {
   return (
     <div>
       <h1 className={cn(PAGE_TITLE_CLASS, "mb-8")}>Calendario de Clases</h1>
+      {isReadOnly ? (
+        <p className="-mt-6 mb-6 text-sm text-zinc-400">Modo espectador: solo lectura.</p>
+      ) : null}
 
       {role === "administracion" ? (
         <>
@@ -1228,7 +1281,7 @@ export default function CalendarioPage() {
               </Button>
               {estadoBotonInscripcion === "socio-inhabilitado" ? (
                 <p className="mt-3 text-sm text-red-400">
-                  No se puede inscribir porque su cuota está vencida o pendiente de pago.
+                  No se puede inscribir porque el socio está dado de baja.
                 </p>
               ) : null}
               <p
@@ -1279,7 +1332,7 @@ export default function CalendarioPage() {
               <Button
                 type="button"
                 onClick={openEditClassSheet}
-                disabled={!selectedClaseId}
+                disabled={!selectedClaseId || isReadOnly}
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 <Pencil className="size-4" aria-hidden />
@@ -1288,7 +1341,7 @@ export default function CalendarioPage() {
               <Button
                 type="button"
                 onClick={cancelarClaseSeleccionada}
-                disabled={!selectedClaseId}
+                disabled={!selectedClaseId || isReadOnly}
                 variant="outline"
                 className="border-primary/55 text-primary hover:bg-primary/10 hover:text-primary"
               >
@@ -1297,6 +1350,7 @@ export default function CalendarioPage() {
               <Button
                 type="button"
                 variant="secondary"
+                disabled={isReadOnly}
                 className="bg-secondary text-secondary-foreground hover:bg-secondary/90"
                 onClick={openNewClassSheet}
               >
@@ -1336,6 +1390,7 @@ export default function CalendarioPage() {
                       value={socioInscripcionAdminId || undefined}
                       onValueChange={setSocioInscripcionAdminId}
                       disabled={
+                        isReadOnly ||
                         isLoadingSociosInscripcionAdmin ||
                         inscribiendoSocioAdmin ||
                         sociosInscribiblesParaAdmin.length === 0
@@ -1371,6 +1426,7 @@ export default function CalendarioPage() {
                     type="button"
                     className="shrink-0 bg-primary text-primary-foreground hover:bg-primary/90"
                     disabled={
+                      isReadOnly ||
                       !socioInscripcionAdminId ||
                       !calendarContext?.userId ||
                       inscribiendoSocioAdmin ||
@@ -1578,8 +1634,10 @@ export default function CalendarioPage() {
                           key={h.id}
                           className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-300"
                         >
-                          El {when}, el instructor cambió de "{instructorAntes}" a "
-                          {instructorDespues}" ({h.nombreAnterior} {timeValueFromDateTime(h.fechaHoraAnterior)} {"->"} {h.nombreNuevo} {timeValueFromDateTime(h.fechaHoraNuevo)}).
+                          El {when}, el instructor cambió de &quot;{instructorAntes}&quot; a
+                          &quot;{instructorDespues}&quot; ({h.nombreAnterior}{" "}
+                          {timeValueFromDateTime(h.fechaHoraAnterior)} {"->"} {h.nombreNuevo}{" "}
+                          {timeValueFromDateTime(h.fechaHoraNuevo)}).
                         </li>
                       );
                     })}
@@ -1601,7 +1659,7 @@ export default function CalendarioPage() {
               <Button
                 type="button"
                 onClick={confirmarClaseSheet}
-                disabled={!sheetNombreClase.trim() || !sheetInstructorId || isSavingClase}
+                disabled={isReadOnly || !sheetNombreClase.trim() || !sheetInstructorId || isSavingClase}
                 className="bg-[#5ab253] font-semibold text-white hover:bg-[#5ab253]/90"
               >
                 {classSheetContext === "edit" || editingClaseId

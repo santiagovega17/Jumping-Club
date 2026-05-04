@@ -32,7 +32,7 @@ export default async function UniversalJumpsDashboardPage() {
         <header className="rounded-2xl border border-violet-500/25 bg-zinc-900/70 px-5 py-4 md:px-6">
           <h1 className={cn(PAGE_TITLE_CLASS, "text-zinc-50")}>Dashboard Franquicias</h1>
           <p className={cn(PAGE_SUBTITLE_CLASS, "text-zinc-300/80")}>
-            Vista global de sucursales habilitadas para Universal Jumps.
+            Vista global de franquicias habilitadas para Universal Jumps.
           </p>
         </header>
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -42,7 +42,7 @@ export default async function UniversalJumpsDashboardPage() {
     );
   }
 
-  const { totalFranquiciasActivas, totalSociosGlobales, ingresosGlobalesMes, sucursales } =
+  const { totalFranquiciasActivas, totalSociosGlobales, ingresosGlobalesMes, franquicias } =
     result.data;
 
   return (
@@ -50,7 +50,7 @@ export default async function UniversalJumpsDashboardPage() {
       <header className="rounded-2xl border border-violet-500/25 bg-zinc-900/70 px-5 py-4 md:px-6">
         <h1 className={cn(PAGE_TITLE_CLASS, "text-zinc-50")}>Dashboard Franquicias</h1>
         <p className={cn(PAGE_SUBTITLE_CLASS, "text-zinc-300/80")}>
-          Vista global de sucursales habilitadas para Universal Jumps.
+          Vista global de franquicias habilitadas para Universal Jumps.
         </p>
       </header>
 
@@ -91,7 +91,7 @@ export default async function UniversalJumpsDashboardPage() {
                 Franquicias habilitadas
               </CardTitle>
               <p className="mt-1 text-sm text-zinc-400">
-                Estado consolidado y acceso rápido a cada sucursal.
+                Estado consolidado y acceso rápido a cada franquicia.
               </p>
             </div>
             <Badge variant="outline" className="border-violet-400/45 text-violet-200">
@@ -105,7 +105,7 @@ export default async function UniversalJumpsDashboardPage() {
           <Table>
             <TableHeader>
               <TableRow className="border-zinc-800">
-                <TableHead className="px-4 py-3 text-zinc-400">Nombre de Sucursal</TableHead>
+                <TableHead className="px-4 py-3 text-zinc-400">Nombre de Franquicia</TableHead>
                 <TableHead className="px-4 py-3 text-zinc-400">Estado</TableHead>
                 <TableHead className="px-4 py-3 text-right text-zinc-400">
                   Cantidad de Socios
@@ -114,21 +114,21 @@ export default async function UniversalJumpsDashboardPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {sucursales.map((sucursal) => (
-                <TableRow key={sucursal.id} className="border-zinc-800/80">
+              {franquicias.map((franquicia) => (
+                <TableRow key={franquicia.id} className="border-zinc-800/80">
                   <TableCell className="px-4 py-3 font-medium text-zinc-100">
-                    {sucursal.nombreSucursal}
+                    {franquicia.nombreFranquicia}
                   </TableCell>
                   <TableCell className="px-4 py-3">
                     <Badge
-                      variant={sucursal.estado === "Activa" ? "success" : "pending"}
+                      variant={franquicia.estado === "Activa" ? "success" : "pending"}
                       className="w-fit"
                     >
-                      {sucursal.estado}
+                      {franquicia.estado}
                     </Badge>
                   </TableCell>
                   <TableCell className="px-4 py-3 text-right tabular-nums text-zinc-200">
-                    {sucursal.cantidadSocios}
+                    {franquicia.cantidadSocios}
                   </TableCell>
                   <TableCell className="px-4 py-3 text-right">
                     <Button
@@ -137,9 +137,9 @@ export default async function UniversalJumpsDashboardPage() {
                       size="sm"
                       className="border-zinc-700 bg-transparent hover:bg-zinc-800"
                     >
-                      <Link href={`/universal-jumps/sucursal/${sucursal.id}`}>
+                      <Link href={`/universal-jumps/franquicia/${franquicia.id}`}>
                         <Eye className="size-4" aria-hidden />
-                        Ver Sucursal
+                        Ver Franquicia
                         <ArrowRight className="size-4" aria-hidden />
                       </Link>
                     </Button>

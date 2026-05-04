@@ -54,7 +54,7 @@ type MovimientoResumen = {
   detalle: string;
 };
 
-type SucursalDashboardOverviewProps = {
+type FranquiciaDashboardOverviewProps = {
   userId?: string | null;
   franquiciaId?: string;
   isReadOnly?: boolean;
@@ -68,11 +68,11 @@ function formatPesos(value: number) {
   }).format(value);
 }
 
-export function SucursalDashboardOverview({
+export function FranquiciaDashboardOverview({
   userId,
   franquiciaId,
   isReadOnly = false,
-}: SucursalDashboardOverviewProps) {
+}: FranquiciaDashboardOverviewProps) {
   const scopeKey = franquiciaId ? `franquicia:${franquiciaId}` : userId ? `user:${userId}` : null;
 
   const swrSilentOptions = {
@@ -352,7 +352,10 @@ export function SucursalDashboardOverview({
                     formatter={(val, name) => {
                       const n = typeof val === "number" ? val : Number(val ?? 0);
                       const key = String(name);
-                      return [formatPesos(Number.isFinite(n) ? n : 0), key === "ingresos" ? "Ingresos" : "Egresos"];
+                      return [
+                        formatPesos(Number.isFinite(n) ? n : 0),
+                        key === "ingresos" ? "Ingresos" : "Egresos",
+                      ];
                     }}
                   />
                   <Legend

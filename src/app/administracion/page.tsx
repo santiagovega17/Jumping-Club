@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
+import { usePathname } from "next/navigation";
 import {
   Cell,
   Legend,
@@ -98,6 +99,7 @@ import {
   obtenerMovimientosRecientes,
   obtenerProximosVencimientos,
 } from "@/actions/caja";
+import { getSpectatorFranquiciaId } from "@/lib/spectator-mode";
 
 const FONT_UI =
   "var(--font-sans), ui-sans-serif, system-ui, sans-serif";
@@ -207,10 +209,6 @@ type CajaDataCache = {
   proximos: Movimiento[];
 };
 
-function isDescripcionVacia(descripcion: string | null | undefined) {
-  return !descripcion || descripcion.trim().length === 0;
-}
-
 function shouldAutoSelectDetalle(
   conceptoPrincipal: string,
   detalles: ConceptoCajaOption[],
@@ -302,6 +300,9 @@ function isPendienteVencido(row: Movimiento) {
 }
 
 export default function AdministracionPage() {
+  const pathname = usePathname();
+  const spectatorFranquiciaId = getSpectatorFranquiciaId(pathname);
+  const isReadOnly = Boolean(spectatorFranquiciaId);
   const [cachedCajaData, setCachedCajaData] = useState<CajaDataCache | null>(null);
   const defaultRange = getCurrentMonthRange();
   const [startDate, setStartDate] = useState(defaultRange.startDate);
@@ -348,6 +349,7 @@ export default function AdministracionPage() {
     try {
       const raw = window.localStorage.getItem("admin-caja-cache-v1");
       if (!raw) return;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCachedCajaData(JSON.parse(raw) as CajaDataCache);
     } catch {
       setCachedCajaData(null);
@@ -364,16 +366,20 @@ export default function AdministracionPage() {
         if (!user) return;
         setCurrentUserId(user.id);
 
-        const { data: perfilAdmin } = await supabase
-          .from("perfiles")
-          .select("franquicia_id")
-          .eq("id", user.id)
-          .single();
-        if (!perfilAdmin?.franquicia_id) return;
+        let scopeFranquiciaId = spectatorFranquiciaId;
+        if (!scopeFranquiciaId) {
+          const { data: perfilAdmin } = await supabase
+            .from("perfiles")
+            .select("franquicia_id")
+            .eq("id", user.id)
+            .single();
+          scopeFranquiciaId = perfilAdmin?.franquicia_id ?? null;
+        }
+        if (!scopeFranquiciaId) return;
 
         const { conceptos, formasPago } = await loadCajaCatalogForFranquicia(
           supabase,
-          perfilAdmin.franquicia_id,
+          scopeFranquiciaId,
         );
         setConceptosCatalog(conceptos);
         setFormasPagoList(formasPago);
@@ -383,19 +389,19 @@ export default function AdministracionPage() {
             supabase
               .from("conceptos_caja")
               .select("id,tipo,concepto,descripcion")
-              .eq("franquicia_id", perfilAdmin.franquicia_id)
+              .eq("franquicia_id", scopeFranquiciaId)
               .order("concepto", { ascending: true })
               .order("descripcion", { ascending: true }),
             supabase
               .from("formas_pago")
               .select("id,nombre,activo")
-              .eq("franquicia_id", perfilAdmin.franquicia_id)
+              .eq("franquicia_id", scopeFranquiciaId)
               .eq("activo", true)
               .order("nombre", { ascending: true }),
             supabase
               .from("socios")
               .select("id,perfil:perfiles(nombre,created_at),plan:planes(precio)")
-              .eq("franquicia_id", perfilAdmin.franquicia_id),
+              .eq("franquicia_id", scopeFranquiciaId),
           ]);
 
         setConceptosOptions(
@@ -440,17 +446,34 @@ export default function AdministracionPage() {
       }
     };
     loadData();
-  }, []);
+  }, [spectatorFranquiciaId]);
 
   const { data: cajaData, isLoading: isCajaLoading, error: cajaError, mutate: mutateCaja } = useSWR(
     currentUserId && startDate && endDate && startDate <= endDate
-      ? ["caja-data", currentUserId, startDate, endDate]
+      ? ["caja-data", currentUserId, startDate, endDate, spectatorFranquiciaId ?? "self"]
       : null,
     async () => {
       const [balanceRes, vencimientosRes, movimientosRes] = await Promise.all([
-        obtenerBalanceCaja({ userId: currentUserId!, startDate, endDate }),
-        obtenerProximosVencimientos({ userId: currentUserId!, startDate, endDate, limit: 10 }),
-        obtenerMovimientosRecientes({ userId: currentUserId!, startDate, endDate, limit: 2_000 }),
+        obtenerBalanceCaja({
+          userId: currentUserId!,
+          startDate,
+          endDate,
+          franquiciaIdOverride: spectatorFranquiciaId ?? undefined,
+        }),
+        obtenerProximosVencimientos({
+          userId: currentUserId!,
+          startDate,
+          endDate,
+          limit: 10,
+          franquiciaIdOverride: spectatorFranquiciaId ?? undefined,
+        }),
+        obtenerMovimientosRecientes({
+          userId: currentUserId!,
+          startDate,
+          endDate,
+          limit: 2_000,
+          franquiciaIdOverride: spectatorFranquiciaId ?? undefined,
+        }),
       ]);
 
       type MovimientoCajaFetch = {
@@ -658,6 +681,7 @@ export default function AdministracionPage() {
   const resultadoNetoCons = totalIngresosCons - totalEgresosCons;
 
   const openNew = useCallback(() => {
+    if (isReadOnly) return;
     setConsolidadoOpen(false);
     setSheetMode("new");
     setEditingId(null);
@@ -672,7 +696,7 @@ export default function AdministracionPage() {
       socioId: "",
       socio: "",
     });
-  }, [conceptosCatalog, formasPagoList, formasPagoOptions]);
+  }, [conceptosCatalog, formasPagoList, formasPagoOptions, isReadOnly]);
 
   const openEdit = useCallback((m: Movimiento) => {
     setConsolidadoOpen(false);
@@ -721,6 +745,7 @@ export default function AdministracionPage() {
   }, []);
 
   const saveDraft = useCallback(async () => {
+    if (isReadOnly) return;
     setHasTriedSubmitMovimiento(true);
     setSubmitError(null);
     const montoNum = Math.abs(Number(draft.monto) || 0);
@@ -783,10 +808,12 @@ export default function AdministracionPage() {
     draft,
     formasPagoOptions,
     sheetMode,
+    isReadOnly,
     mutateCaja,
   ]);
 
   const deleteMovimiento = useCallback(async (movimiento: Movimiento) => {
+    if (isReadOnly) return;
     if (!currentUserId) {
       toast.error("No se pudo identificar el usuario actual");
       return;
@@ -807,7 +834,7 @@ export default function AdministracionPage() {
     }
     await mutateCaja();
     toast.success("Movimiento eliminado");
-  }, [currentUserId, editingId, mutateCaja]);
+  }, [currentUserId, editingId, isReadOnly, mutateCaja]);
 
 
   const conceptosByCategoria = useMemo(
@@ -867,6 +894,7 @@ export default function AdministracionPage() {
   );
 
   const openQuickSettle = useCallback((movimiento: Movimiento) => {
+    if (isReadOnly) return;
     const socio = safeSociosOptions.find((item) => item.id === movimiento.socioId);
     setQuickSettleTarget(movimiento);
     setQuickSettleFormaPagoId(movimiento.formaPagoId || safeFormaPagoOptions[0]?.id || "");
@@ -877,9 +905,10 @@ export default function AdministracionPage() {
     );
     setQuickSettleObservaciones(movimiento.observaciones ?? "");
     setQuickSettleOpen(true);
-  }, [safeFormaPagoOptions, safeSociosOptions]);
+  }, [isReadOnly, safeFormaPagoOptions, safeSociosOptions]);
 
   const confirmQuickSettle = useCallback(async () => {
+    if (isReadOnly) return;
     if (!currentUserId || !quickSettleTarget?.id) {
       toast.error("No se pudo identificar el movimiento");
       return;
@@ -913,6 +942,7 @@ export default function AdministracionPage() {
     }
   }, [
     currentUserId,
+    isReadOnly,
     mutateCaja,
     quickSettleFormaPagoId,
     quickSettleMonto,
@@ -954,6 +984,7 @@ export default function AdministracionPage() {
     if (!sheetOpen || !autoDetalle || draft.conceptoId || detallesConceptoSeleccionado.length === 0) return;
     const detalleDefault = detallesConceptoSeleccionado[0];
     if (!detalleDefault?.id) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDraft((d) => ({
       ...d,
       conceptoId: String(detalleDefault.id),
@@ -969,6 +1000,9 @@ export default function AdministracionPage() {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="mb-8">
           <h1 className={PAGE_TITLE_CLASS}>Balance de Caja</h1>
+          {isReadOnly ? (
+            <p className="mt-2 text-sm text-zinc-400">Modo espectador: solo lectura.</p>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Popover>
@@ -1028,7 +1062,8 @@ export default function AdministracionPage() {
           <Button
             type="button"
             onClick={openNew}
-            className="gap-2 bg-[#e41b68] font-semibold text-white hover:bg-[#e41b68]/90"
+            disabled={isReadOnly}
+            className="gap-2 bg-[#e41b68] font-semibold text-white hover:bg-[#e41b68]/90 disabled:opacity-50"
           >
             <Plus className="size-4 shrink-0" aria-hidden />
             Nuevo Movimiento
@@ -1200,6 +1235,7 @@ export default function AdministracionPage() {
                               type="button"
                               variant="ghost"
                               size="icon"
+                              disabled={isReadOnly}
                               className="text-[#5ab253] hover:text-[#82d47d]"
                               onClick={(e) => {
                                 e.preventDefault();
@@ -1313,6 +1349,7 @@ export default function AdministracionPage() {
                               type="button"
                               variant="ghost"
                               size="icon"
+                              disabled={isReadOnly}
                               className="text-[#5ab253] hover:text-[#82d47d]"
                               onClick={(e) => {
                                 e.preventDefault();
@@ -1462,6 +1499,7 @@ export default function AdministracionPage() {
                             type="button"
                             variant="ghost"
                             size="icon"
+                            disabled={isReadOnly}
                             className="text-[#e41b68] hover:text-[#ff8fb8]"
                             onClick={(e) => {
                               e.preventDefault();
@@ -2179,6 +2217,7 @@ export default function AdministracionPage() {
                 <Button
                   type="button"
                   variant="outline"
+                  disabled={isReadOnly}
                   className="border-[#e41b68]/50 text-[#e41b68] hover:bg-[#e41b68]/10 hover:text-[#ff8fb8]"
                   onClick={() => {
                     const current = movimientos.find((m) => m.id === editingId);
@@ -2207,7 +2246,7 @@ export default function AdministracionPage() {
                 <Button
                   type="submit"
                   form="movimiento-form"
-                  disabled={saveDisabled}
+                  disabled={saveDisabled || isReadOnly}
                   className="bg-[#5ab253] font-semibold text-white hover:bg-[#5ab253]/90"
                 >
                   Guardar
@@ -2239,6 +2278,7 @@ export default function AdministracionPage() {
             </Button>
             <Button
               type="button"
+              disabled={isReadOnly}
               className="bg-[#e41b68] text-white hover:bg-[#e41b68]/90"
               onClick={() => {
                 if (!deleteTarget) return;
@@ -2345,7 +2385,7 @@ export default function AdministracionPage() {
             </Button>
             <Button
               type="button"
-              disabled={isQuickSettling || !quickSettleFormaPagoId}
+              disabled={isQuickSettling || !quickSettleFormaPagoId || isReadOnly}
               className="bg-[#5ab253] text-white hover:bg-[#5ab253]/90"
               onClick={() => {
                 void confirmQuickSettle();

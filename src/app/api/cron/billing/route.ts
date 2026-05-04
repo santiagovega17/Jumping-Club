@@ -21,7 +21,7 @@ export async function GET(request: Request) {
     }
 
     const today = new Date();
-    const isDayOne = today.getDate() === 27;
+    const isDayOne = today.getDate() === 1;
 
     const generatedResult = isDayOne ? await generarCuotasPendientes() : null;
     const morososResult = await sincronizarSociosMorosos();

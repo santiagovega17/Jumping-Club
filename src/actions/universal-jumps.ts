@@ -2,12 +2,12 @@
 
 import { createClient } from "@supabase/supabase-js";
 
-type EstadoSucursal = "Activa" | "Inactiva";
+type EstadoFranquicia = "Activa" | "Inactiva";
 
-export type UniversalJumpsSucursalRow = {
+export type UniversalJumpsFranquiciaRow = {
   id: string;
-  nombreSucursal: string;
-  estado: EstadoSucursal;
+  nombreFranquicia: string;
+  estado: EstadoFranquicia;
   cantidadSocios: number;
 };
 
@@ -15,7 +15,7 @@ export type UniversalJumpsDashboardData = {
   totalFranquiciasActivas: number;
   totalSociosGlobales: number;
   ingresosGlobalesMes: number;
-  sucursales: UniversalJumpsSucursalRow[];
+  franquicias: UniversalJumpsFranquiciaRow[];
 };
 
 function getAdminClient() {
@@ -48,8 +48,8 @@ export async function getUniversalJumpsDashboardData(): Promise<
 
     const { startDate, endDate } = getCurrentMonthRange();
 
-    const [sucursalesRes, sociosRes, ingresosMesRes] = await Promise.all([
-      admin.from("sucursales").select("id,nombre,estado"),
+    const [franquiciasRes, sociosRes, ingresosMesRes] = await Promise.all([
+      admin.from("franquicias").select("id,nombre"),
       admin.from("socios").select("id,sucursal_id,franquicia_id,estado"),
       admin
         .from("movimientos_caja")
@@ -60,50 +60,29 @@ export async function getUniversalJumpsDashboardData(): Promise<
         .lte("fecha", endDate),
     ]);
 
-    if (sucursalesRes.error) return { ok: false, error: sucursalesRes.error.message };
+    if (franquiciasRes.error) return { ok: false, error: franquiciasRes.error.message };
     if (sociosRes.error) return { ok: false, error: sociosRes.error.message };
     if (ingresosMesRes.error) return { ok: false, error: ingresosMesRes.error.message };
 
     const sociosPorFranquicia = new Map<string, number>();
-    const sociosActivosPorFranquicia = new Map<string, number>();
-
     for (const socio of sociosRes.data ?? []) {
       const franquiciaId = socio.sucursal_id ?? socio.franquicia_id;
       if (!franquiciaId) continue;
 
       sociosPorFranquicia.set(franquiciaId, (sociosPorFranquicia.get(franquiciaId) ?? 0) + 1);
-
-      const estadoSocio = String(socio.estado ?? "").toLowerCase();
-      if (!estadoSocio || estadoSocio === "activo") {
-        sociosActivosPorFranquicia.set(
-          franquiciaId,
-          (sociosActivosPorFranquicia.get(franquiciaId) ?? 0) + 1,
-        );
-      }
     }
 
-    const sucursales: UniversalJumpsSucursalRow[] = (sucursalesRes.data ?? []).map((sucursal) => {
-      const activos = sociosActivosPorFranquicia.get(sucursal.id) ?? 0;
-      const estadoSucursal = String(sucursal.estado ?? "").toLowerCase();
-      const estado: EstadoSucursal =
-        estadoSucursal === "activa" || estadoSucursal === "activo"
-          ? "Activa"
-          : estadoSucursal === "inactiva" || estadoSucursal === "inactivo"
-            ? "Inactiva"
-            : activos > 0
-              ? "Activa"
-              : "Inactiva";
+    const franquicias: UniversalJumpsFranquiciaRow[] = (franquiciasRes.data ?? []).map((franquicia) => {
+      const estado: EstadoFranquicia = "Activa";
       return {
-        id: sucursal.id,
-        nombreSucursal: sucursal.nombre,
+        id: franquicia.id,
+        nombreFranquicia: franquicia.nombre,
         estado,
-        cantidadSocios: sociosPorFranquicia.get(sucursal.id) ?? 0,
+        cantidadSocios: sociosPorFranquicia.get(franquicia.id) ?? 0,
       };
     });
 
-    const totalFranquiciasActivas = sucursales.filter(
-      (sucursal) => sucursal.estado === "Activa",
-    ).length;
+    const totalFranquiciasActivas = franquicias.length;
 
     const totalSociosGlobales = sociosRes.data?.length ?? 0;
 
@@ -119,7 +98,7 @@ export async function getUniversalJumpsDashboardData(): Promise<
         totalFranquiciasActivas,
         totalSociosGlobales,
         ingresosGlobalesMes,
-        sucursales,
+        franquicias,
       },
     };
   } catch (error) {

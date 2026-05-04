@@ -8,6 +8,7 @@ type RangoFechas = {
   startDate: string;
   endDate: string;
   userId: string;
+  franquiciaIdOverride?: string;
 };
 
 type ObtenerProximosVencimientosInput = RangoFechas & {
@@ -79,7 +80,11 @@ type MovimientoBalanceRow = {
 async function resolveFranquiciaId(
   userId: string,
   admin: ReturnType<typeof getAdminClient>,
+  franquiciaIdOverride?: string,
 ) {
+  if (franquiciaIdOverride) {
+    return { franquiciaId: franquiciaIdOverride, error: null };
+  }
   if (!admin) return { franquiciaId: null, error: "Cliente de Supabase no disponible" };
   const { data, error } = await admin
     .from("perfiles")
@@ -111,6 +116,7 @@ export async function obtenerBalanceCaja(input: RangoFechas) {
     const { franquiciaId, error: franquiciaError } = await resolveFranquiciaId(
       input.userId,
       admin,
+      input.franquiciaIdOverride,
     );
     if (franquiciaError || !franquiciaId) {
       return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };
@@ -174,6 +180,7 @@ export async function obtenerProximosVencimientos(
     const { franquiciaId, error: franquiciaError } = await resolveFranquiciaId(
       input.userId,
       admin,
+      input.franquiciaIdOverride,
     );
     if (franquiciaError || !franquiciaId) {
       return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };
@@ -215,6 +222,7 @@ export async function obtenerMovimientosRecientes(
     const { franquiciaId, error: franquiciaError } = await resolveFranquiciaId(
       input.userId,
       admin,
+      input.franquiciaIdOverride,
     );
     if (franquiciaError || !franquiciaId) {
       return { ok: false as const, error: franquiciaError ?? "Franquicia no encontrada" };

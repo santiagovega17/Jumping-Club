@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
+import { usePathname } from "next/navigation";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import {
   Accordion,
@@ -48,11 +49,13 @@ import {
   PAGE_TITLE_CLASS,
 } from "@/lib/headings";
 import { cn } from "@/lib/utils";
+import { formatPlanLabel } from "@/lib/plan-label";
 import { toTitleCase } from "@/lib/text";
 import { toast } from "sonner";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import { actualizarMinutosLimiteBajaInscripcionAction } from "@/actions/franquicia";
 import type { ConceptoCaja, FormaPago, PlantillaClase } from "@/types/database.types";
+import { getSpectatorFranquiciaId } from "@/lib/spectator-mode";
 
 const LABEL_TECH =
   "text-sm font-medium text-zinc-400 uppercase tracking-wider";
@@ -113,6 +116,8 @@ type Pase = {
   id: string;
   nombre: string;
   precio: number;
+  clasesPorSemana: number;
+  globalPlanId?: string | null;
   estado?: string | null;
 };
 
@@ -161,34 +166,10 @@ const defaultConfig: ClubConfig = {
   aplicarCupoNuevas: true,
 };
 
-function newId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
 function formatPesos(value: number) {
   const abs = Math.abs(value);
   const formatted = abs.toLocaleString("es-AR", { maximumFractionDigits: 0 });
   return `$${formatted}`;
-}
-
-function sanitizePases(raw: unknown): Pase[] {
-  if (!Array.isArray(raw)) return defaultConfig.pases;
-  const list = raw
-    .map((x) => {
-      if (!x || typeof x !== "object") return null;
-      const o = x as Record<string, unknown>;
-      const id = typeof o.id === "string" ? o.id : newId("pase");
-      const nombre =
-        typeof o.nombre === "string" ? o.nombre.trim() : "";
-      const precio = Math.max(
-        0,
-        Math.round(Number(o.precio) || 0),
-      );
-      if (!nombre) return null;
-      return { id, nombre, precio };
-    })
-    .filter((x): x is Pase => x != null);
-  return list;
 }
 
 function mergeSchedules(
@@ -255,16 +236,19 @@ function persistableSlice(c: ClubConfig): PersistedClubSlice {
 }
 
 export default function ConfiguracionPage() {
+  const pathname = usePathname();
+  const spectatorFranquiciaId = getSpectatorFranquiciaId(pathname);
+  const isReadOnly = Boolean(spectatorFranquiciaId);
   const [config, setConfig] = useState<ClubConfig>(defaultConfig);
   const [hydrated, setHydrated] = useState(false);
 
   const [selectedDay, setSelectedDay] = useState<DayId>("lun");
 
-  const [nuevoPaseNombre, setNuevoPaseNombre] = useState("");
-  const [nuevoPasePrecio, setNuevoPasePrecio] = useState("");
   const [planesVista, setPlanesVista] = useState<"activos" | "archivados" | "todos">(
     "activos",
   );
+  const [precioDraftByPlanId, setPrecioDraftByPlanId] = useState<Record<string, string>>({});
+  const [isEditingPrecioByPlanId, setIsEditingPrecioByPlanId] = useState<Record<string, boolean>>({});
 
   const [nuevaForma, setNuevaForma] = useState("");
 
@@ -303,6 +287,9 @@ export default function ConfiguracionPage() {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return null;
+      if (spectatorFranquiciaId) {
+        return { franquiciaId: spectatorFranquiciaId, userId: user.id };
+      }
       const { data: perfil, error: perfilError } = await supabase
         .from("perfiles")
         .select("franquicia_id")
@@ -326,7 +313,7 @@ export default function ConfiguracionPage() {
       const [planesRes, instRes, fpRes, ccRes, plRes, franquiciaRes] = await Promise.all([
         supabase
           .from("planes")
-          .select("id,nombre,precio,estado")
+          .select("id,nombre,precio,estado,clases_por_semana,global_plan_id")
           .eq("franquicia_id", franquiciaId)
           .order("nombre", { ascending: true }),
         supabase
@@ -375,6 +362,10 @@ export default function ConfiguracionPage() {
                 id: p.id,
                 nombre: p.nombre,
                 precio: Math.round(Number(p.precio) || 0),
+                clasesPorSemana: Number(
+                  (p as { clases_por_semana?: number | null }).clases_por_semana ?? 1,
+                ),
+                globalPlanId: (p as { global_plan_id?: string | null }).global_plan_id ?? null,
                 estado: p.estado,
               }))
             : [],
@@ -403,7 +394,10 @@ export default function ConfiguracionPage() {
         ? window.localStorage.getItem(STORAGE_KEY)
         : null,
     );
-    if (loaded) setConfig((c) => ({ ...defaultConfig, ...loaded }));
+    if (loaded) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setConfig({ ...defaultConfig, ...loaded });
+    }
     setHydrated(true);
   }, []);
 
@@ -417,6 +411,7 @@ export default function ConfiguracionPage() {
 
   useEffect(() => {
     if (!franquiciaData) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAdminFranquiciaId(franquiciaData.franquiciaId);
     setConfig((c) => ({ ...c, pases: franquiciaData.pases }));
     setInstructoresRows(franquiciaData.instructores);
@@ -424,6 +419,7 @@ export default function ConfiguracionPage() {
     setConceptosCajaRows(franquiciaData.conceptos);
     setPlantillasRows(franquiciaData.plantillas);
     setMinutosLimiteBajaInscripcion(franquiciaData.minutosLimiteBajaInscripcion);
+    setIsEditingPrecioByPlanId({});
   }, [franquiciaData]);
 
   const guardarLimiteBajaInscripcion = useCallback(async () => {
@@ -506,75 +502,26 @@ export default function ConfiguracionPage() {
     [plantillasRows, selectedDay],
   );
 
-  const addPase = async () => {
-    const nombre = toTitleCase(nuevoPaseNombre.trim());
-    const precio = Math.max(0, Math.round(Number(nuevoPasePrecio) || 0));
-    if (!nombre) return;
-    if (!adminFranquiciaId) {
-      toast.error("No se pudo identificar la franquicia del administrador");
-      return;
-    }
-
-    try {
-      const supabase = createSupabaseClient();
-      const { error } = await supabase.from("planes").insert({
-        franquicia_id: adminFranquiciaId,
-        nombre,
-        precio,
-        estado: "activo",
-      });
-
-      if (error) {
-        toast.error(error.message);
-        return;
-      }
-
-      await mutateFranquiciaData();
-      setNuevoPaseNombre("");
-      setNuevoPasePrecio("");
-      toast.success("Plan creado correctamente");
-    } catch {
-      toast.error("No se pudo crear el plan");
-    }
-  };
-
-  const removePase = async (id: string) => {
+  const guardarPrecioPlan = async (id: string) => {
     if (!adminFranquiciaId) return;
+    const precio = Math.max(0, Math.round(Number(precioDraftByPlanId[id] ?? "") || 0));
     try {
       const supabase = createSupabaseClient();
       const { error } = await supabase
         .from("planes")
-        .update({ estado: "inactivo" })
+        .update({ precio })
         .eq("id", id)
         .eq("franquicia_id", adminFranquiciaId);
       if (error) {
         toast.error(error.message);
-        return;
+        return false;
       }
       await mutateFranquiciaData();
-      toast.success("Pase eliminado correctamente");
+      toast.success("Precio actualizado");
+      return true;
     } catch {
-      toast.error("No se pudo eliminar el plan");
-    }
-  };
-
-  const restorePase = async (id: string) => {
-    if (!adminFranquiciaId) return;
-    try {
-      const supabase = createSupabaseClient();
-      const { error } = await supabase
-        .from("planes")
-        .update({ estado: "activo" })
-        .eq("id", id)
-        .eq("franquicia_id", adminFranquiciaId);
-      if (error) {
-        toast.error(error.message);
-        return;
-      }
-      await mutateFranquiciaData();
-      toast.success("Plan restaurado correctamente");
-    } catch {
-      toast.error("No se pudo restaurar el plan");
+      toast.error("No se pudo actualizar el precio");
+      return false;
     }
   };
 
@@ -969,6 +916,11 @@ export default function ConfiguracionPage() {
     <div className="min-w-0 font-sans text-zinc-50">
       <div className="mb-8">
         <h1 className={PAGE_TITLE_CLASS}>Configuración</h1>
+        {isReadOnly ? (
+          <p className="mt-2 text-sm text-zinc-400">
+            Modo espectador: solo lectura.
+          </p>
+        ) : null}
       </div>
 
       <Tabs defaultValue="pases" className="w-full min-w-0">
@@ -1008,55 +960,16 @@ export default function ConfiguracionPage() {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="pases" className="mt-0 outline-none">
+        <TabsContent value="pases" className={cn("mt-0 outline-none", isReadOnly && "pointer-events-none opacity-80")}>
           <Card className={cardClass}>
             <CardHeader>
               <PremiumCardTitle>Planes del gimnasio</PremiumCardTitle>
               <CardDescription className="text-sm text-zinc-500">
-                Los planes son inmutables en nombre/precio: para actualizar un valor,
-                creá uno nuevo y archivá el anterior.
+                Los planes disponibles se definen desde Configuración Global.
+                En cada franquicia podés ajustar solo el precio.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <div className="rounded-xl border border-zinc-800/50 bg-zinc-950/50 p-4">
-                <p className={cn(LABEL_TECH, "mb-3")}>Nuevo pase</p>
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                  <div className="min-w-0 flex-1 space-y-1.5">
-                    <Label htmlFor="pase-nombre" className={LABEL_TECH}>
-                      Nombre del pase
-                    </Label>
-                    <Input
-                      id="pase-nombre"
-                      value={nuevoPaseNombre}
-                      onChange={(e) => setNuevoPaseNombre(e.target.value)}
-                      className="border-zinc-800 bg-zinc-950 text-zinc-100"
-                    />
-                  </div>
-                  <div className="w-full space-y-1.5 sm:w-40">
-                    <Label htmlFor="pase-precio" className={LABEL_TECH}>
-                      Precio mensual
-                    </Label>
-                    <Input
-                      id="pase-precio"
-                      type="number"
-                      min={0}
-                      step={500}
-                      value={nuevoPasePrecio}
-                      onChange={(e) => setNuevoPasePrecio(e.target.value)}
-                      className="border-zinc-800 bg-zinc-950 text-zinc-100"
-                    />
-                  </div>
-                  <Button
-                    type="button"
-                    className={cn("w-full shrink-0 sm:w-auto", BTN_FUCSIA)}
-                    onClick={() => void addPase()}
-                  >
-                    <Plus className="size-4" aria-hidden />
-                    Agregar pase
-                  </Button>
-                </div>
-              </div>
-
               <div>
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <p className={LABEL_TECH}>Planes</p>
@@ -1086,6 +999,7 @@ export default function ConfiguracionPage() {
                   <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
                     {pasesFiltrados.map((p) => {
                       const archivado = p.estado === "inactivo";
+                      const isEditingPrecio = Boolean(isEditingPrecioByPlanId[p.id]);
                       return (
                         <article
                           key={p.id}
@@ -1095,7 +1009,7 @@ export default function ConfiguracionPage() {
                           )}
                         >
                           <div className="flex items-start justify-between gap-3">
-                            <h4 className="text-xl font-bold text-zinc-100">{p.nombre}</h4>
+                            <h4 className="text-xl font-bold text-zinc-100">{formatPlanLabel(p.nombre)}</h4>
                             <span
                               className={cn(
                                 "inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold",
@@ -1107,30 +1021,61 @@ export default function ConfiguracionPage() {
                               {archivado ? "Archivado" : "Activo"}
                             </span>
                           </div>
-
-                          <p className="my-4 text-3xl font-extrabold tracking-tight text-zinc-50">
+                          <p className="mt-2 text-xs text-zinc-400">
+                            Límite semanal: {p.clasesPorSemana} clases
+                          </p>
+                          <p className="my-3 text-3xl font-extrabold tracking-tight text-zinc-50">
                             {formatPesos(p.precio)}
                           </p>
-
-                          <div className="mt-4 border-t border-zinc-800/70 pt-4">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              className={cn(
-                                "w-full border-zinc-700 bg-transparent",
-                                archivado
-                                  ? "text-zinc-200 hover:bg-zinc-800"
-                                  : "text-[#e41b68] hover:bg-[#e41b68]/10 hover:text-[#e41b68]",
-                              )}
-                              onClick={() =>
-                                archivado
-                                  ? void restorePase(p.id)
-                                  : void removePase(p.id)
-                              }
-                              aria-label={`${archivado ? "Restaurar" : "Archivar"} ${p.nombre}`}
-                            >
-                              {archivado ? "Restaurar" : "Archivar"}
-                            </Button>
+                          <div className="mt-4 border-t border-zinc-800/70 pt-4 space-y-2">
+                            <Label htmlFor={`precio-plan-${p.id}`} className={LABEL_TECH}>
+                              Precio mensual
+                            </Label>
+                            <div className="flex gap-2">
+                              <Input
+                                id={`precio-plan-${p.id}`}
+                                type="number"
+                                min={0}
+                                step={500}
+                                value={precioDraftByPlanId[p.id] ?? String(p.precio)}
+                                onChange={(e) =>
+                                  setPrecioDraftByPlanId((prev) => ({
+                                    ...prev,
+                                    [p.id]: e.target.value,
+                                  }))
+                                }
+                                className="border-zinc-800 bg-zinc-950 text-zinc-100"
+                                disabled={!isEditingPrecio || isReadOnly}
+                              />
+                              <Button
+                                type="button"
+                                variant="outline"
+                                className="border-zinc-700 bg-transparent"
+                                onClick={() => {
+                                  if (isEditingPrecio) {
+                                    void (async () => {
+                                      const ok = await guardarPrecioPlan(p.id);
+                                      if (!ok) return;
+                                      setIsEditingPrecioByPlanId((prev) => ({
+                                        ...prev,
+                                        [p.id]: false,
+                                      }));
+                                    })();
+                                    return;
+                                  }
+                                  setPrecioDraftByPlanId((prev) => ({
+                                    ...prev,
+                                    [p.id]: prev[p.id] ?? String(p.precio),
+                                  }));
+                                  setIsEditingPrecioByPlanId((prev) => ({
+                                    ...prev,
+                                    [p.id]: true,
+                                  }));
+                                }}
+                              >
+                                {isEditingPrecio ? "Guardar" : "Editar"}
+                              </Button>
+                            </div>
                           </div>
                         </article>
                       );
@@ -1142,7 +1087,7 @@ export default function ConfiguracionPage() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="formas" className="mt-0 outline-none">
+        <TabsContent value="formas" className={cn("mt-0 outline-none", isReadOnly && "pointer-events-none opacity-80")}>
           <Card className={cardClass}>
             <CardHeader>
               <PremiumCardTitle>Formas de pago</PremiumCardTitle>
@@ -1208,7 +1153,7 @@ export default function ConfiguracionPage() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="conceptos" className="mt-0 outline-none">
+        <TabsContent value="conceptos" className={cn("mt-0 outline-none", isReadOnly && "pointer-events-none opacity-80")}>
           <Card className={cardClass}>
             <CardHeader>
               <PremiumCardTitle>Conceptos de caja</PremiumCardTitle>
@@ -1477,7 +1422,7 @@ export default function ConfiguracionPage() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="instructores" className="mt-0 outline-none">
+        <TabsContent value="instructores" className={cn("mt-0 outline-none", isReadOnly && "pointer-events-none opacity-80")}>
           <Card className={cardClass}>
             <CardHeader>
               <PremiumCardTitle>Instructores</PremiumCardTitle>
@@ -1595,7 +1540,7 @@ export default function ConfiguracionPage() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="horarios" className="mt-0 space-y-8 outline-none">
+        <TabsContent value="horarios" className={cn("mt-0 space-y-8 outline-none", isReadOnly && "pointer-events-none opacity-80")}>
           <Card className={cardClass}>
             <CardHeader>
               <PremiumCardTitle>

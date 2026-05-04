@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { Building2, LogOut, Settings, Shield } from "lucide-react";
+import { Building2, LogOut, Settings } from "lucide-react";
 import { signOut } from "@/actions/auth";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import logoUJ from "../../../logo-UJ.png";
 
 const navigationItems = [
   {
@@ -38,23 +39,21 @@ export function UniversalJumpsSidebar({
   return (
     <aside
       className={cn(
-        "z-40 flex h-screen w-72 flex-col gap-2 border-r border-violet-500/30 bg-zinc-900 p-4 text-foreground",
+        "z-40 flex h-screen w-64 flex-col gap-2 border-r border-violet-500/30 bg-zinc-900 p-4 text-foreground",
         fixed && "fixed left-0 top-0",
         className,
       )}
     >
-      <div className="mb-4 rounded-lg border border-violet-500/25 bg-violet-500/10 px-3 py-2">
-        <p className="text-xs font-medium uppercase tracking-widest text-violet-200/90">
-          Franquicias
-        </p>
-        <div className="mt-1 flex items-center justify-between gap-2">
-          <h2 className="text-base font-bold uppercase tracking-widest text-zinc-100">
-            Universal Jumps
-          </h2>
-          <Badge variant="outline" className="border-violet-400/45 text-violet-200">
-            <Shield className="size-3.5" aria-hidden />
-            Global
-          </Badge>
+      <div className="mb-4 px-1 py-1">
+        <div className="flex items-center justify-center">
+          <Image
+            src={logoUJ}
+            alt="Universal Jumps"
+            width={210}
+            height={90}
+            className="h-auto w-full object-contain"
+            priority
+          />
         </div>
       </div>
 

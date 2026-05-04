@@ -4,8 +4,11 @@ import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { Building2, Eye, EyeOff, Shield } from "lucide-react";
 import {
+  createFranquiciaWithAdminAction,
   getUniversalJumpsConfigOverview,
   resetFranquiciaAdminPasswordAction,
+  saveUniversalJumpsGlobalPlansAction,
+  saveUniversalJumpsGlobalTemplatesAction,
 } from "@/actions/universal-jumps-config";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,16 +30,16 @@ import { cn } from "@/lib/utils";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import { toast } from "sonner";
 
-const GLOBAL_SETTINGS_STORAGE_KEY = "universal-jumps-global-settings-v1";
-
 type GlobalSettingsDraft = {
   formasPagoDefault: string;
   conceptosIngresoDefault: string;
+  planesDefault: string;
 };
 
 const DEFAULT_SETTINGS: GlobalSettingsDraft = {
   formasPagoDefault: "Efectivo\nTransferencia\nDébito\nCrédito",
   conceptosIngresoDefault: "Pago de Cuota\nInscripción\nVenta de productos",
+  planesDefault: "Plan 3xSemana|3\nPlan Mensual|99\nClase Individual|1",
 };
 
 export default function ConfiguracionGlobalPage() {
@@ -53,24 +56,20 @@ export default function ConfiguracionGlobalPage() {
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isSavingPassword, setIsSavingPassword] = useState(false);
+  const [isCreatingFranquicia, setIsCreatingFranquicia] = useState(false);
+  const [newFranquiciaForm, setNewFranquiciaForm] = useState({
+    franquiciaNombre: "",
+    franquiciaDireccion: "",
+    adminNombre: "",
+    adminEmail: "",
+    adminPassword: "",
+  });
 
-  const { data, isLoading } = useSWR("uj-config-overview", async () => {
+  const { data, isLoading, mutate } = useSWR("uj-config-overview", async () => {
     const result = await getUniversalJumpsConfigOverview();
     if (!result.ok) throw new Error(result.error);
     return result.data;
   });
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const stored = window.localStorage.getItem(GLOBAL_SETTINGS_STORAGE_KEY);
-      if (!stored) return;
-      const parsed = JSON.parse(stored) as Partial<GlobalSettingsDraft>;
-      setSettings((prev) => ({ ...prev, ...parsed }));
-    } catch {
-      // noop
-    }
-  }, []);
 
   useEffect(() => {
     const loadUser = async () => {
@@ -83,10 +82,59 @@ export default function ConfiguracionGlobalPage() {
     void loadUser();
   }, []);
 
-  const saveSettings = () => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(GLOBAL_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-    toast.success("Configuración global guardada (MVP local)");
+  useEffect(() => {
+    if (!data) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSettings({
+      formasPagoDefault:
+        data.formasPagoDefault.length > 0
+          ? data.formasPagoDefault.join("\n")
+          : DEFAULT_SETTINGS.formasPagoDefault,
+      conceptosIngresoDefault:
+        data.conceptosIngresoDefault.length > 0
+          ? data.conceptosIngresoDefault.join("\n")
+          : DEFAULT_SETTINGS.conceptosIngresoDefault,
+      planesDefault:
+        (data.planesGlobales ?? []).length > 0
+          ? (data.planesGlobales ?? [])
+              .map((p) => `${p.nombre}|${p.clasesPorSemana}`)
+              .join("\n")
+          : DEFAULT_SETTINGS.planesDefault,
+    });
+  }, [data]);
+
+  const saveSettings = async () => {
+    if (!currentUserId) {
+      toast.error("No se pudo identificar al usuario actual");
+      return;
+    }
+    const result = await saveUniversalJumpsGlobalTemplatesAction({
+      requesterUserId: currentUserId,
+      formasPagoDefault: settings.formasPagoDefault,
+      conceptosIngresoDefault: settings.conceptosIngresoDefault,
+    });
+    if (!result.ok) {
+      toast.error(result.error ?? "No se pudo guardar la plantilla global");
+      return;
+    }
+    toast.success("Plantillas globales guardadas correctamente");
+  };
+
+  const saveGlobalPlans = async () => {
+    if (!currentUserId) {
+      toast.error("No se pudo identificar al usuario actual");
+      return;
+    }
+    const result = await saveUniversalJumpsGlobalPlansAction({
+      requesterUserId: currentUserId,
+      planesDefault: settings.planesDefault,
+    });
+    if (!result.ok) {
+      toast.error(result.error ?? "No se pudieron guardar los planes globales");
+      return;
+    }
+    await mutate();
+    toast.success("Planes globales guardados y sincronizados");
   };
 
   const openPasswordDialog = (admin: { id: string; nombre: string; email: string }) => {
@@ -142,21 +190,64 @@ export default function ConfiguracionGlobalPage() {
     }
   };
 
+  const submitCreateFranquicia = async () => {
+    if (!currentUserId) {
+      toast.error("No se pudo identificar al usuario actual");
+      return;
+    }
+    if (
+      !newFranquiciaForm.franquiciaNombre.trim() ||
+      !newFranquiciaForm.adminNombre.trim() ||
+      !newFranquiciaForm.adminEmail.trim() ||
+      !newFranquiciaForm.adminPassword.trim()
+    ) {
+      toast.error("Completá nombre de franquicia y datos del admin");
+      return;
+    }
+
+    setIsCreatingFranquicia(true);
+    try {
+      const result = await createFranquiciaWithAdminAction({
+        requesterUserId: currentUserId,
+        franquiciaNombre: newFranquiciaForm.franquiciaNombre,
+        franquiciaDireccion: newFranquiciaForm.franquiciaDireccion,
+        adminNombre: newFranquiciaForm.adminNombre,
+        adminEmail: newFranquiciaForm.adminEmail,
+        adminPassword: newFranquiciaForm.adminPassword,
+      });
+      if (!result.ok) {
+        toast.error(result.error ?? "No se pudo crear la franquicia");
+        return;
+      }
+      setNewFranquiciaForm({
+        franquiciaNombre: "",
+        franquiciaDireccion: "",
+        adminNombre: "",
+        adminEmail: "",
+        adminPassword: "",
+      });
+      await mutate();
+      toast.success("Franquicia y admin creados correctamente");
+    } finally {
+      setIsCreatingFranquicia(false);
+    }
+  };
+
   return (
     <div className="space-y-6 md:space-y-8">
       <header className="rounded-2xl border border-violet-500/25 bg-zinc-900/70 px-5 py-4 md:px-6">
         <h1 className={cn(PAGE_TITLE_CLASS, "text-zinc-50")}>Configuración Global</h1>
         <p className={cn(PAGE_SUBTITLE_CLASS, "text-zinc-300/80")}>
-          Parámetros y estándares aplicables a todas las sucursales.
+          Parámetros y estándares aplicables a todas las franquicias.
         </p>
       </header>
 
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Card className="border border-zinc-800 bg-card/95">
           <CardHeader className="pb-2">
-            <p className={KPI_TITLE_CLASS}>Sucursales Totales</p>
+            <p className={KPI_TITLE_CLASS}>Franquicias Totales</p>
             <CardTitle className="text-3xl font-semibold text-zinc-100 tabular-nums">
-              {isLoading ? "..." : data?.totalSucursales ?? 0}
+              {isLoading ? "..." : data?.totalFranquicias ?? 0}
             </CardTitle>
           </CardHeader>
         </Card>
@@ -184,10 +275,96 @@ export default function ConfiguracionGlobalPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-zinc-100">
               <Building2 className="size-4 text-violet-300" />
+              Nueva Franquicia
+            </CardTitle>
+            <CardDescription className="text-zinc-400">
+              Crea una franquicia y su admin principal en un solo paso.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="franq-nombre">Nombre de franquicia</Label>
+                <Input
+                  id="franq-nombre"
+                  value={newFranquiciaForm.franquiciaNombre}
+                  onChange={(e) =>
+                    setNewFranquiciaForm((prev) => ({ ...prev, franquiciaNombre: e.target.value }))
+                  }
+                  className="border-zinc-800 bg-zinc-900"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="franq-direccion">Dirección</Label>
+                <Input
+                  id="franq-direccion"
+                  value={newFranquiciaForm.franquiciaDireccion}
+                  onChange={(e) =>
+                    setNewFranquiciaForm((prev) => ({ ...prev, franquiciaDireccion: e.target.value }))
+                  }
+                  className="border-zinc-800 bg-zinc-900"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="franq-admin-nombre">Nombre admin</Label>
+                <Input
+                  id="franq-admin-nombre"
+                  value={newFranquiciaForm.adminNombre}
+                  onChange={(e) =>
+                    setNewFranquiciaForm((prev) => ({ ...prev, adminNombre: e.target.value }))
+                  }
+                  className="border-zinc-800 bg-zinc-900"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="franq-admin-email">Email admin</Label>
+                <Input
+                  id="franq-admin-email"
+                  type="email"
+                  value={newFranquiciaForm.adminEmail}
+                  onChange={(e) =>
+                    setNewFranquiciaForm((prev) => ({ ...prev, adminEmail: e.target.value }))
+                  }
+                  className="border-zinc-800 bg-zinc-900"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="franq-admin-password">Contraseña inicial</Label>
+                <Input
+                  id="franq-admin-password"
+                  type="password"
+                  value={newFranquiciaForm.adminPassword}
+                  onChange={(e) =>
+                    setNewFranquiciaForm((prev) => ({ ...prev, adminPassword: e.target.value }))
+                  }
+                  className="border-zinc-800 bg-zinc-900"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-zinc-500">
+              La contraseña debe tener mínimo 8 caracteres, al menos una mayúscula, una minúscula y un número.
+            </p>
+            <Button
+              type="button"
+              onClick={() => void submitCreateFranquicia()}
+              disabled={isCreatingFranquicia}
+              className="bg-[#5ab253] text-white hover:bg-[#5ab253]/90"
+            >
+              {isCreatingFranquicia ? "Creando..." : "Crear franquicia"}
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card className="border border-zinc-800 bg-card/95">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-zinc-100">
+              <Building2 className="size-4 text-violet-300" />
               Plantillas para Nuevas Franquicias
             </CardTitle>
             <CardDescription className="text-zinc-400">
-              Defaults operativos sugeridos al dar de alta una sucursal.
+              Defaults operativos sugeridos al dar de alta una franquicia.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -211,7 +388,23 @@ export default function ConfiguracionGlobalPage() {
                 className="min-h-24"
               />
             </div>
-            <Button onClick={saveSettings} variant="outline" className="border-zinc-700">
+            <div className="space-y-1.5">
+              <Label>Planes globales (formato: Nombre|Clases por semana)</Label>
+              <Textarea
+                value={settings.planesDefault}
+                onChange={(e) =>
+                  setSettings((prev) => ({ ...prev, planesDefault: e.target.value }))
+                }
+                className="min-h-24"
+              />
+              <p className="text-xs text-zinc-500">
+                Ejemplo: Plan 2xSemana|2. Estos planes quedan disponibles para todas las franquicias.
+              </p>
+            </div>
+            <Button onClick={() => void saveGlobalPlans()} variant="outline" className="border-zinc-700">
+              Guardar planes globales
+            </Button>
+            <Button onClick={() => void saveSettings()} variant="outline" className="border-zinc-700">
               Guardar plantillas
             </Button>
           </CardContent>
@@ -222,14 +415,14 @@ export default function ConfiguracionGlobalPage() {
         <CardHeader className="border-b border-zinc-800">
           <CardTitle className="text-zinc-100">Admins por franquicia</CardTitle>
           <CardDescription className="text-zinc-400">
-            Visibilidad centralizada de responsables por sucursal.
+            Visibilidad centralizada de responsables por franquicia.
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
             <TableHeader>
               <TableRow className="border-zinc-800">
-                <TableHead className="px-4 py-3 text-zinc-400">Sucursal</TableHead>
+                <TableHead className="px-4 py-3 text-zinc-400">Franquicia</TableHead>
                 <TableHead className="px-4 py-3 text-zinc-400">Nombre</TableHead>
                 <TableHead className="px-4 py-3 text-zinc-400">Email</TableHead>
                 <TableHead className="px-4 py-3 text-zinc-400">Rol</TableHead>

@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
+import useSWR from "swr";
 import { Button } from "@/components/ui/button";
 import { SectionHeading } from "@/components/SectionHeading";
 import { KPI_TITLE_CLASS, PAGE_TITLE_CLASS } from "@/lib/headings";
 import { cn } from "@/lib/utils";
 import { useEffect, useState } from "react";
+import { getMiPerfilAction } from "@/actions/perfil";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
-import { SucursalDashboardOverview } from "@/components/dashboard/SucursalDashboardOverview";
+import { FranquiciaDashboardOverview } from "@/components/dashboard/FranquiciaDashboardOverview";
 
 type Role = "admin" | "socio";
 
@@ -49,12 +51,43 @@ export default function DashboardPage() {
     void loadUser();
   }, []);
 
+  const { data: socioResumen } = useSWR(
+    role === "socio" && currentUserId ? ["socio-dashboard-resumen", currentUserId] : null,
+    async () => {
+      const result = await getMiPerfilAction(currentUserId!);
+      if (!result.ok) throw new Error(result.error);
+      return result.data;
+    },
+    { revalidateOnFocus: false },
+  );
+
+  const estadoSocio = String(socioResumen?.estado ?? "").toLowerCase();
+  const estadoSocioLabel =
+    estadoSocio === "activo"
+      ? "Activo"
+      : estadoSocio === "vencido"
+        ? "Vencido"
+        : estadoSocio === "inactivo"
+          ? "Dado de baja"
+          : "Sin estado";
+
+  const proximaClaseLabel = socioResumen?.proximaClase
+    ? `${new Date(socioResumen.proximaClase.fechaHora).toLocaleDateString("es-AR", {
+        weekday: "short",
+        day: "2-digit",
+        month: "2-digit",
+      })} · ${new Date(socioResumen.proximaClase.fechaHora).toLocaleTimeString("es-AR", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`
+    : "Sin datos suficientes";
+
   return (
     <div className="min-w-0 font-sans">
       <h1 className={cn(PAGE_TITLE_CLASS, "mb-8")}>Dashboard</h1>
 
       {role === "admin" ? (
-        <SucursalDashboardOverview userId={currentUserId} />
+        <FranquiciaDashboardOverview userId={currentUserId} />
       ) : (
         <div className="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-[1.25fr_1fr]">
           <section className="rounded-2xl border border-zinc-800/50 bg-card p-4 md:p-8">
@@ -65,8 +98,13 @@ export default function DashboardPage() {
 
             <div className="mt-6 rounded-xl border border-secondary/30 bg-zinc-900 p-5">
               <p className={KPI_TITLE_CLASS}>Próxima clase</p>
-              <p className="mt-2 text-lg font-semibold leading-tight text-zinc-100">—</p>
-              <p className="mt-1 text-sm text-foreground/75">Sin datos suficientes</p>
+              <p className="mt-2 text-lg font-semibold leading-tight text-zinc-100">
+                {socioResumen?.proximaClase?.nombre ?? "—"}
+              </p>
+              <p className="mt-1 text-sm text-foreground/75">{proximaClaseLabel}</p>
+              {socioResumen?.proximaClase?.instructor ? (
+                <p className="mt-1 text-xs text-zinc-400">Instructor: {socioResumen.proximaClase.instructor}</p>
+              ) : null}
             </div>
 
             <div className="mt-6 flex flex-wrap gap-3">
@@ -87,14 +125,15 @@ export default function DashboardPage() {
             <SectionHeading as="h3">Tu actividad</SectionHeading>
             <div className="mt-4 space-y-2 text-sm">
               <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2">
-                Asistencia del mes:{" "}
-                <span className="font-semibold text-secondary">—</span>
+                Estado del socio:{" "}
+                <span className="font-semibold text-secondary">{estadoSocioLabel}</span>
               </div>
               <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2">
-                Próximo vencimiento: <span className="font-semibold">—</span>
+                Clases asistidas esta semana:{" "}
+                <span className="font-semibold">{socioResumen?.clasesAsistidasSemana ?? 0}</span>
               </div>
               <div className="rounded-lg border border-white/10 bg-black/15 px-3 py-2">
-                Plan actual: <span className="font-semibold">—</span>
+                Plan actual: <span className="font-semibold">{socioResumen?.plan ?? "—"}</span>
               </div>
             </div>
           </section>
