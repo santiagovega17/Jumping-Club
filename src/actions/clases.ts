@@ -459,7 +459,7 @@ export async function getCalendarioFranquiciaDataAction(input: GetCalendarioFran
           nombre: x.nombre,
           instructorId: x.instructor_id,
           horario: x.horario,
-          diaSemana: x.dia_semana,
+          diaSemana: x.dia_semana as "lun" | "mar" | "mie" | "jue" | "vie" | "sab",
           validFrom: x.valid_from ?? null,
           validTo: x.valid_to ?? null,
         })),

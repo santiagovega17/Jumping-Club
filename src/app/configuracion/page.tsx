@@ -54,7 +54,7 @@ import { toTitleCase } from "@/lib/text";
 import { toast } from "sonner";
 import { createClient as createSupabaseClient } from "@/lib/supabase/client";
 import { actualizarMinutosLimiteBajaInscripcionAction } from "@/actions/franquicia";
-import type { ConceptoCaja, FormaPago, PlantillaClase } from "@/types/database.types";
+import type { ConceptoCaja, FormaPago, PlantillaClase } from "@/types/db-row-aliases";
 import { getSpectatorFranquiciaId } from "@/lib/spectator-mode";
 
 const LABEL_TECH =

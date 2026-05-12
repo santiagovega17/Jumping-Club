@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "supabase:link": "npx supabase link --project-ref qajkvmlqknjvydwaymsi",
-    "supabase:push": "npx supabase db push"
+    "supabase:push": "npx supabase db push",
+    "supabase:types": "npx supabase gen types typescript --linked > src/types/database.types.ts"
   },
   "dependencies": {
     "@radix-ui/react-select": "^2.2.6",
