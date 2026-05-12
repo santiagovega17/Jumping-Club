@@ -50,10 +50,10 @@ export async function getUniversalJumpsDashboardData(): Promise<
 
     const [franquiciasRes, sociosRes, ingresosMesRes] = await Promise.all([
       admin.from("franquicias").select("id,nombre"),
-      admin.from("socios").select("id,sucursal_id,franquicia_id,estado"),
+      admin.from("socios").select("id,franquicia_id,estado"),
       admin
         .from("movimientos_caja")
-        .select("monto,sucursal_id,franquicia_id")
+        .select("monto,franquicia_id")
         .eq("tipo", "ingreso")
         .eq("estado", "pagado")
         .gte("fecha", startDate)
@@ -66,7 +66,7 @@ export async function getUniversalJumpsDashboardData(): Promise<
 
     const sociosPorFranquicia = new Map<string, number>();
     for (const socio of sociosRes.data ?? []) {
-      const franquiciaId = socio.sucursal_id ?? socio.franquicia_id;
+      const franquiciaId = socio.franquicia_id;
       if (!franquiciaId) continue;
 
       sociosPorFranquicia.set(franquiciaId, (sociosPorFranquicia.get(franquiciaId) ?? 0) + 1);
@@ -87,7 +87,7 @@ export async function getUniversalJumpsDashboardData(): Promise<
     const totalSociosGlobales = sociosRes.data?.length ?? 0;
 
     const ingresosGlobalesMes = (ingresosMesRes.data ?? []).reduce((acc, item) => {
-      const scopedId = item.sucursal_id ?? item.franquicia_id;
+      const scopedId = item.franquicia_id;
       if (!scopedId) return acc;
       return acc + Number(item.monto ?? 0);
     }, 0);

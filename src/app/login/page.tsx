@@ -51,9 +51,9 @@ export default function LoginPage() {
         return;
       }
 
-      const isSuperAdminRole = perfil.rol === "admin_global";
+      const isSuperAdminRole = perfil.rol === "superadmin_global";
       const isAdminRole =
-        perfil.rol === "admin_global" || perfil.rol === "admin_franquicia";
+        perfil.rol === "superadmin_global" || perfil.rol === "admin_franquicia";
       sessionStorage.setItem(
         "userRole",
         isSuperAdminRole ? "superadmin" : isAdminRole ? "admin" : "socio",

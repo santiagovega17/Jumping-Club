@@ -18,6 +18,19 @@ type GetClaseHistorialInput = {
   franquiciaId: string;
 };
 
+type ClaseHistorialDbRow = {
+  id: string;
+  clase_id: string;
+  franquicia_id: string;
+  nombre_anterior: string;
+  instructor_id_anterior: string | null;
+  fecha_hora_anterior: string;
+  nombre_nuevo: string;
+  instructor_id_nuevo: string | null;
+  fecha_hora_nuevo: string;
+  editado_en: string | null;
+};
+
 type InscribirSocioEnClaseInput = {
   claseId: string;
   socioId: string;
@@ -54,30 +67,14 @@ export async function updateClaseWithHistoryAction(input: UpdateClaseInput) {
         error: "Faltan variables de entorno de Supabase",
       };
     }
-    const { data: actual, error: selectError } = await admin
+    const { data: claseRow, error: selectError } = await admin
       .from("clases")
-      .select("id,nombre,instructor_id,fecha_hora")
+      .select("id")
       .eq("id", input.claseId)
       .eq("franquicia_id", input.franquiciaId)
       .single();
-    if (selectError || !actual) {
+    if (selectError || !claseRow) {
       return { ok: false as const, error: selectError?.message ?? "Clase no encontrada" };
-    }
-
-    // Registra snapshot antes del update; la fecha/hora nueva se mantiene igual a la actual
-    // porque fecha_hora es inmutable por regla de negocio.
-    const { error: historialError } = await admin.from("clases_historial").insert({
-      clase_id: actual.id,
-      franquicia_id: input.franquiciaId,
-      nombre_anterior: actual.nombre,
-      instructor_id_anterior: actual.instructor_id,
-      fecha_hora_anterior: actual.fecha_hora,
-      nombre_nuevo: input.nombre,
-      instructor_id_nuevo: input.instructorId,
-      fecha_hora_nuevo: actual.fecha_hora,
-    });
-    if (historialError) {
-      return { ok: false as const, error: historialError.message };
     }
 
     const { error: updateError } = await admin
@@ -110,26 +107,16 @@ export async function getClaseHistorialAction(input: GetClaseHistorialInput) {
       return {
         ok: false as const,
         error: "Faltan variables de entorno de Supabase",
-        rows: [] as Array<Database["public"]["Tables"]["clases_historial"]["Row"]>,
+        rows: [] as ClaseHistorialDbRow[],
       };
     }
-
-    const { data, error } = await admin
-      .from("clases_historial")
-      .select("*")
-      .eq("clase_id", input.claseId)
-      .eq("franquicia_id", input.franquiciaId)
-      .order("editado_en", { ascending: false });
-
-    if (error) {
-      return { ok: false as const, error: error.message, rows: [] as Array<Database["public"]["Tables"]["clases_historial"]["Row"]> };
-    }
-    return { ok: true as const, rows: data ?? [] };
+    void input;
+    return { ok: true as const, rows: [] as ClaseHistorialDbRow[] };
   } catch (error) {
     return {
       ok: false as const,
       error: error instanceof Error ? error.message : "No se pudo cargar el historial",
-      rows: [] as Array<Database["public"]["Tables"]["clases_historial"]["Row"]>,
+      rows: [] as ClaseHistorialDbRow[],
     };
   }
 }
@@ -179,7 +166,7 @@ export async function inscribirSocioEnClase(input: InscribirSocioEnClaseInput) {
         return { ok: false as const, error: "No se pudo validar al operador" };
       }
       const rol = operador.rol as string;
-      if (rol !== "admin_franquicia" && rol !== "admin_global") {
+      if (rol !== "admin_franquicia" && rol !== "superadmin_global") {
         return { ok: false as const, error: "Solo un administrador puede inscribir a otro socio" };
       }
       if (rol === "admin_franquicia") {

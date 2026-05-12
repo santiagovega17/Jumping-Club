@@ -36,7 +36,7 @@ export type Database = {
       perfiles: {
         Row: {
           id: string;
-          rol: "admin_global" | "admin_franquicia" | "socio";
+          rol: "superadmin_global" | "admin_franquicia" | "recepcionista" | "socio";
           franquicia_id: string | null;
           nombre: string;
           email: string;
@@ -44,7 +44,7 @@ export type Database = {
         };
         Insert: {
           id: string;
-          rol: "admin_global" | "admin_franquicia" | "socio";
+          rol: "superadmin_global" | "admin_franquicia" | "recepcionista" | "socio";
           franquicia_id?: string | null;
           nombre: string;
           email: string;
@@ -52,7 +52,7 @@ export type Database = {
         };
         Update: {
           id?: string;
-          rol?: "admin_global" | "admin_franquicia" | "socio";
+          rol?: "superadmin_global" | "admin_franquicia" | "recepcionista" | "socio";
           franquicia_id?: string | null;
           nombre?: string;
           email?: string;
@@ -456,60 +456,6 @@ export type Database = {
           },
         ];
       };
-      clases_historial: {
-        Row: {
-          id: string;
-          clase_id: string;
-          franquicia_id: string;
-          nombre_anterior: string;
-          instructor_id_anterior: string | null;
-          fecha_hora_anterior: string;
-          nombre_nuevo: string;
-          instructor_id_nuevo: string | null;
-          fecha_hora_nuevo: string;
-          editado_en: string | null;
-        };
-        Insert: {
-          id?: string;
-          clase_id: string;
-          franquicia_id: string;
-          nombre_anterior: string;
-          instructor_id_anterior?: string | null;
-          fecha_hora_anterior: string;
-          nombre_nuevo: string;
-          instructor_id_nuevo?: string | null;
-          fecha_hora_nuevo: string;
-          editado_en?: string | null;
-        };
-        Update: {
-          id?: string;
-          clase_id?: string;
-          franquicia_id?: string;
-          nombre_anterior?: string;
-          instructor_id_anterior?: string | null;
-          fecha_hora_anterior?: string;
-          nombre_nuevo?: string;
-          instructor_id_nuevo?: string | null;
-          fecha_hora_nuevo?: string;
-          editado_en?: string | null;
-        };
-        Relationships: [
-          {
-            foreignKeyName: "clases_historial_clase_id_fkey";
-            columns: ["clase_id"];
-            isOneToOne: false;
-            referencedRelation: "clases";
-            referencedColumns: ["id"];
-          },
-          {
-            foreignKeyName: "clases_historial_franquicia_id_fkey";
-            columns: ["franquicia_id"];
-            isOneToOne: false;
-            referencedRelation: "franquicias";
-            referencedColumns: ["id"];
-          },
-        ];
-      };
       clases: {
         Row: {
           id: string;
@@ -573,4 +519,3 @@ export type ConceptoCaja = Database["public"]["Tables"]["conceptos_caja"]["Row"]
 export type PlantillaClase = Database["public"]["Tables"]["plantillas_clases"]["Row"];
 export type MovimientoCaja = Database["public"]["Tables"]["movimientos_caja"]["Row"];
 export type Inscripcion = Database["public"]["Tables"]["inscripciones"]["Row"];
-export type ClaseHistorial = Database["public"]["Tables"]["clases_historial"]["Row"];

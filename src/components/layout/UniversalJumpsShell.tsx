@@ -15,9 +15,7 @@ type UniversalJumpsShellProps = {
 export function UniversalJumpsShell({ children }: UniversalJumpsShellProps) {
   const pathname = usePathname();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const isFranquiciaSpectatorView =
-    pathname.startsWith("/universal-jumps/franquicia/") ||
-    pathname.startsWith("/universal-jumps/sucursal/");
+  const isFranquiciaSpectatorView = pathname.startsWith("/universal-jumps/franquicia/");
 
   return (
     <div className="min-h-screen bg-zinc-950">

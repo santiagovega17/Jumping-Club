@@ -341,7 +341,7 @@ export async function saveUniversalJumpsGlobalPlansAction(
     if (requesterError || !requester) {
       return { ok: false, error: "No se pudo validar el usuario que solicita el cambio" };
     }
-    if (requester.rol !== "admin_global") {
+    if (requester.rol !== "superadmin_global") {
       return { ok: false, error: "Solo Universal Jumps puede editar planes globales" };
     }
 
@@ -413,7 +413,7 @@ export async function saveUniversalJumpsGlobalTemplatesAction(
     if (requesterError || !requester) {
       return { ok: false, error: "No se pudo validar el usuario que solicita el cambio" };
     }
-    if (requester.rol !== "admin_global") {
+    if (requester.rol !== "superadmin_global") {
       return { ok: false, error: "Solo Universal Jumps puede editar plantillas globales" };
     }
 
@@ -475,7 +475,7 @@ export async function resetFranquiciaAdminPasswordAction(
     if (requesterError || !requester) {
       return { ok: false, error: "No se pudo validar el usuario que solicita el cambio" };
     }
-    if (requester.rol !== "admin_global") {
+    if (requester.rol !== "superadmin_global") {
       return { ok: false, error: "Solo Universal Jumps puede cambiar contraseñas de franquicia" };
     }
 
@@ -547,7 +547,7 @@ export async function createFranquiciaWithAdminAction(
     if (requesterError || !requester) {
       return { ok: false, error: "No se pudo validar el usuario que solicita el alta" };
     }
-    if (requester.rol !== "admin_global") {
+    if (requester.rol !== "superadmin_global") {
       return { ok: false, error: "Solo Universal Jumps puede crear franquicias" };
     }
 

@@ -1,7 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const SUPERADMIN_ROLES = new Set(["admin_global", "superadmin"]);
+const SUPERADMIN_ROLES = new Set(["superadmin_global", "superadmin"]);
 
 function isLocalDashboardPath(pathname: string) {
   return (

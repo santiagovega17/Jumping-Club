@@ -1,5 +1,5 @@
 export function getSpectatorFranquiciaId(pathname: string): string | null {
-  const match = /^\/universal-jumps\/(?:franquicia|sucursal)\/([^/]+)/.exec(pathname);
+  const match = /^\/universal-jumps\/franquicia\/([^/]+)/.exec(pathname);
   return match?.[1] ?? null;
 }
 
